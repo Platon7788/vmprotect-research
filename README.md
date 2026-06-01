@@ -2,7 +2,7 @@
 
 Generalized VMProtect devirtualizer supporting versions 1.x, 2.x, and 3.x. Standalone CLI tool + Ghidra plugin.
 
-**Status:** ✅ Production Ready | **Validation:** 22/22 samples (100%)
+**Status:** ✅ Production Ready | **Validation:** 22/22 samples (100%) | **Scope:** VMP ≤3.6 (3.7+ requires reverse engineering)
 
 ---
 
@@ -157,9 +157,10 @@ Pattern matching on:
 
 ## Known Limitations
 
-1. **XOR Key Validation Warnings** - Expected for VMP 1.x/2.x (non-critical)
-2. **VMP 3.x Dispatch Detection** - Uses fallback strategy for newer obfuscation
-3. **Linux Samples** - Not included in current test set (ELF support implemented)
+1. **VMP 3.7+ (Merged Handlers)** - Not supported. VMP 3.7+ introduced merged handlers (multiple ops per handler entry) which breaks current classifier. Requires reverse engineering with actual 3.7+ sample. See `FUTURE_WORK.md` for details.
+2. **XOR Key Validation Warnings** - Expected for VMP 1.x/2.x (non-critical)
+3. **VMP 3.x Dispatch Detection** - Uses fallback strategy for newer obfuscation
+4. **Linux Samples** - Not included in current test set (ELF support implemented)
 
 ---
 
