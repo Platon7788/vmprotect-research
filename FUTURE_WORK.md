@@ -46,6 +46,8 @@ Need actual VMP 3.7+ protected binary:
 - **Known families:** SystemBC, RisePro, PrivateLoader, Qbot (all use 3.7+)
 - **Alternative:** Protect test binary with VMP 3.7+ demo (requires Windows GUI)
 
+**Status (2026-06-01):** Created VMP 3.10.5 test binary via console tool. Static analysis fails (packed/encrypted dispatch table). Requires runtime unpacking or dynamic analysis approach.
+
 ### Phase 2: Reverse Engineer Merged Handler Structure
 
 With sample in hand:
