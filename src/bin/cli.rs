@@ -17,7 +17,7 @@ struct Args {
     binary: PathBuf,
 
     /// VIP address to start devirtualization (hex)
-    #[arg(short, long, value_name = "ADDRESS")]
+    #[arg(short = 'i', long, value_name = "ADDRESS")]
     vip: Option<String>,
 
     /// Output format (json, text)
@@ -179,4 +179,18 @@ fn format_text(instructions: &[vmp_devirt::DecodedInstruction]) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Guards against short-flag / long-flag collisions and other clap
+    /// definition mistakes at CI time. Without this, mistakes only surface
+    /// the first time the binary is actually invoked.
+    #[test]
+    fn cli_definition_is_valid() {
+        Args::command().debug_assert();
+    }
 }
