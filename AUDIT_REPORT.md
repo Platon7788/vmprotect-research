@@ -83,6 +83,38 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 
 **Оценка:** 3-5 дней (нужна референсная таблица handlers из VMP 3.5.1 source leak — уже упомянута в README).
 
+**Reference taxonomy (cross-validated 2026-07-26):**
+
+Собрана из двух независимых open-source девиртуализаторов, оба **GPL-3.0** (использовать только как reference, не копировать код). Обе базы совпадают на ядре handlers и покрывают VMP 3.x x64.
+
+Источники:
+- `0xnobody/vmpattack` — `VMPAttack/vm_instruction_set.hpp`
+- `can1357/NoVmp` (2163★) — `NoVmp/vmprotect/architecture.cpp`, `il2vtil.cpp`
+
+Комбинированный список ≈35 VMP-semantic handlers:
+
+| Категория | Handlers |
+|---|---|
+| Data movement (VM-stack) | `POP`, `POPSTK`, `PUSH`, `PUSHSTK`, `PUSHREG`, `POPREG` |
+| Load/Store (VM-context / memory) | `LDD`, `STR` |
+| VSP manipulation | `VSETVSP` (NoVmp) |
+| Arithmetic base | `ADD`, `DIV`, `IDIV`, `MUL`, `IMUL` |
+| Logic primitives (De Morgan) | `NAND`, `NOR` — комбинациями дают `AND`/`OR`/`XOR`/`NOT`/`SUB` |
+| Shifts / rotates | `SHL`, `SHR`, `SHLD`, `SHRD`, `RCL`, `RCR` |
+| Flags | `POPF` |
+| System | `RDTSC`, `CPUID` (`VCPUID` / `VCPUIDX`), `LOCKOR`, `VPUSHCR0`, `VPUSHCR3` |
+| Control-flow | `VJMP` (in-VM branch), `RET`, `VMEXIT` |
+| Escape / meta | `VEMIT` (raw x86 emit), `VEXEC` (nested VM entry), `VNOP`, `VUNK` |
+
+**Готовый план для Q2-subagent (когда возьмёмся):**
+1. Ввести `enum VmpSemantic` с этими ~35 вариантами в `src/handler_classifier.rs`.
+2. Расширить `HandlerClassification` полем `vmp_semantic: Option<VmpSemantic>` (не ломает API — `handler_type: String` остаётся fallback).
+3. Реализовать multi-instruction matcher для 6-10 самых distinctive шаблонов (POP, PUSH-imm, PUSH-reg, NAND, NOR, VMEXIT, RET, VJMP) — паттерны VMP pipeline (`MOV reg,[VSP]` + `ADD VSP,size` + `MOV reg,[VIP]` + `MOV [CTX+reg],reg` = POP; и т.д.). Паттерны пишутся с нуля по описаниям — не копипаста из GPL.
+4. Fallback на существующие x86-instruction-level labels для неопознанных handlers.
+5. Unit-тесты на синтетических handler-body последовательностях.
+
+**Что НЕЛЬЗЯ верифицировать без sample-а:** true-positive rate на реальных VMP 3.x бинарниках. Требуется real-sample validation set (~5-10 разных VMP-protected `.exe`) — открытый пункт.
+
 ---
 
 ### 🟠 Q3 — Реальный `alu::decompose_chain`
