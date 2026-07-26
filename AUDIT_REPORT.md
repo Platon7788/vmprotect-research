@@ -205,36 +205,87 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 
 ## 3. Приоритизированный roadmap
 
-### Спринт 1 (завершён) — «Честный релиз 0.2»
-- ~~C1, C3, C4~~ — устранена архитектурная ложь: реальный VMP1/2 detect (скоринговый каскад), реальный `size()`, убран hardcoded RVA. См. `cbb6186`.
-- ~~Q9~~ — README переписан с фактическими цифрами.
-- ~~Q11~~ — корень реорганизован, отчёты перенесены в `docs/`.
+### ✅ Спринт 1 (завершён) — «Честный релиз 0.2»
+- C1, C3, C4 — устранена архитектурная ложь. См. `cbb6186`.
+- Q9, Q11 — README + docs reorg. См. `cbb6186`.
 
-### Спринт 2 (частично завершён) — «Полное покрытие handlers»
-- Q2, Q4 — **осталось**: реальный table-driven VMP-семантический классификатор + exhaustive `decode_operands`.
-- Q3 — **осталось**: символический ALU decompose (сейчас dummy stack-slot имена).
-- ~~S7~~ — bounds-safe чтение handler bytes сделано (`read_bytes_up_to`). См. `cbb6186`.
+### ✅ Спринт 3 (завершён) — «Инфраструктура»
+- Q10 — CI + cargo-audit + cargo-deny + rustfmt/clippy. См. `d81cfbd`.
+- Q7 — `unicorn_*` переименованы. См. `cbb6186`.
+- S7 — bounds-safe handler read. См. `cbb6186`.
+- CLI: `-v` collision fix + regression-guard test. См. `2ce88ec`.
 
-### Спринт 3 (завершён) — «Инфраструктура»
-- ~~Q10~~ — CI + cargo-audit + cargo-deny + rustfmt/clippy configs добавлены. См. `d81cfbd`.
-- Q1/Q13 — **осталось**: integration tests + real-file/real-sample fixtures (текущие 66 тестов — все in-memory синтетика).
-- ~~Q7~~ — `unicorn_*` переименованы (`xor_key_analyzer.rs`, `dispatch_extractor_py.rs`). См. `cbb6186`.
+### 🔴 Findings из живого запуска на `clmods.dll` (2026-07-26)
 
-### Спринт 4 (2-3 недели) — «Полировка» (не начат)
-- Q15 — оценка миграции на Rust `unicorn-engine`.
+Реальный запуск CLI на не-VMP-бинарнике выявил три недоработки поверх известных Q2/Q3/Q4:
+
+**F1 — `Default VIP 0x140001000` в `src/bin/cli.rs` — hardcoded, часто невалиден.**
+На реальном DLL с иным image_base падает `Invalid VA: 0x140001000` и `Decoded 0 instructions`. Фикс: дефолтить в entry point PE или в первый адрес `.text` через `PEBinary`, если пользователь не указал `--vip`. Оценка: 30 мин.
+
+**F2 — Non-VMP бинарник даёт misleading выхлоп** (`Detected VMP version: Unknown`, `confidence: 35/100`, потом попытка devirtualize).
+Фикс: при `VmpVersion::Unknown` + confidence < 40 + dispatch table не найден → exit(2) с ясным сообщением «Not a VMP-protected binary (or version below detection threshold). Use `--dispatch-rva` if you have a known-good hint.». Не делать devirtualize_range на этом пути. Оценка: 20 мин.
+
+**F3 — Нет способа переопределить detected version.**
+Полезно для research: `--force-version vmp35` чтобы прогнать хотя бы partial pipeline. Оценка: 30 мин.
+
+### 🟠 Спринт 2 (в работе) — «Полное покрытие handlers»
+- Q2 — реальный VMP-семантический классификатор (~35 handlers, taxonomy готова, см. §Q2).
+- Q4 — exhaustive `decode_operands` под Q2 taxonomy.
+- Q3 — символический ALU decompose (dummy → VSP slot names).
+
+### 🟡 Спринт 4 (не начат) — «Полировка»
+- Q15 — Rust `unicorn-engine` вместо Python subprocess.
 - Q14 — command-injection sanity + reproducibility logging.
-- X-new — подключить `OpcodeCryptor`/`ALUReconstructor` к пайплайну (после Q2/Q3).
-- X-new — end-to-end валидация на реальном x86 VMP-сэмпле.
-- Documentation pass (rustdoc examples для публичных API).
+- X-new/A — подключить `OpcodeCryptor` в `Bytecode::decode_operands` (сейчас dead-code-in-pipeline).
+- X-new/B — подключить `ALUReconstructor` в decode-pipeline после Q3.
+- X-new/C — end-to-end валидация на реальном x86 VMP-сэмпле.
+- X-new/D — rustdoc examples для публичного API.
 
 ---
 
-## 4. Ссылки на код
+## 5. Недельный roadmap для следующей сессии (реалистичный)
 
-- Cargo.toml `deps`: [D:\GitHub\Rust_Projects\VM-Protect-Research\Cargo.toml](./Cargo.toml)
-- Архитектурный проход: коммиты `cbb6186` (audit-driven overhaul: real detectors, dual-bitness, hardening), `d81cfbd` (CI + supply-chain security) на `main`.
-- Auto memory ruflo: `C:\Users\Platon\.claude\projects\D--GitHub-Rust-Projects-VM-Protect-Research\memory\` — читается в будущие сессии.
+Цель: получить рабочий инструмент, честно анализирующий простой VMP-3 sample (hello world под VMP), с выхлопом узнаваемых handler-имён.
+
+| День | Задача | Как делать | Оценка | Зависимости |
+|---|---|---|---|---|
+| **1** | F1+F2+F3 — CLI полировка | 1 subagent (мелкий, ~30 мин фоном): дефолт VIP из entry_point, graceful exit на non-VMP, `--force-version`. Плюс: интеграционный тест который запускает бинарь через `assert_cmd` на mock-PE fixture (ловит будущие CLI-регрессии как `-v` collision). | 2 ч | — |
+| **2** | Q2-lite — VmpSemantic enum + 6 базовых matchers | 1 subagent: `VmpSemantic { Pop, PushImm, PushReg, Nand, Nor, Ret, Vmexit, Vjmp, Unknown }`, `HandlerClassification.vmp_semantic: Option<VmpSemantic>`, multi-instruction matcher для этих 6 (VSP-fetch → operand → CTX-store etc). Fallback на существующие x86-labels. Тесты на синтетических handler-body. | 4-6 ч | Taxonomy §Q2 |
+| **3** | Q2-full — оставшиеся ~29 handlers + Q4 (`decode_operands` refresh) | 1 subagent: расширяем matcher-таблицу до полной taxonomy; обновляем `decode_operands` под новые VmpSemantic. | 6-8 ч | День 2 |
+| **4** | X-new/A — подключить `OpcodeCryptor` в pipeline | Пишу сам (не subagent): в `decode_operands` вызвать `OpcodeCryptor::decrypt_operands` для VMP-версий которые шифруют immediate. CRC-init из VIP handler-а. Тесты. | 4 ч | Q2 |
+| **5** | Q3 — символический ALU decompose | 1 subagent: `VspSlot(offset)` вместо dummy строк; De Morgan → синтезированный `Add/Sub/And/Or/Xor`; вызов из `decode_operands` для NOR/NAND. Тесты. | 6-8 ч | Q2 |
+| **6** | X-new/C — real-sample validation | Собираю 3-5 VMP-3 sample-бинарников (можно с VMProtect Free/Trial на простом hello-world). Прогоняю CLI. Ловим bugs. Правлю. | 6 ч | Дни 1-5 |
+| **7** | X-new/B — `ALUReconstructor` в pipeline + доработка + release 0.2 | Подключаем ALUReconstructor. Пишу CHANGELOG. Тегаю v0.2.0. Пушим CI зелёный. | 4 ч | Дни 1-6 |
+
+**Итого:** ~40-45 часов работы с subagent-ассистированием. За календарную неделю (5 рабочих дней по 8 часов) реалистично закрыть дни 1-5. Дни 6-7 могут уползти во вторую неделю если валидация вскроет глубокие баги (обычно вскрывает).
+
+**Что получишь на выходе (v0.2.0):**
+- CLI, который на простом VMP-3 hello world выдаёт правильные VMP-semantic handler-имена вместо `MOV_REG_MEM`.
+- Devirtualize_range шагает по реальным instruction-длинам, decrypts operand через `OpcodeCryptor`, восстанавливает `ADD/SUB/AND/OR/XOR` из NOR/NAND-цепочек.
+- Graceful exit на не-VMP бинарниках.
+- Все 66+ юнит-тестов + новые integration-тесты (`assert_cmd` на mock-PE).
+- CI зелёный на Windows + Linux + security audit.
+- Documented API + пример в README.
+
+**Что НЕ получишь:**
+- Полное покрытие VMP 3.7+ (merged handlers) — отдельная неделя, нужен sample именно 3.7+.
+- Real symbolic execution engine (не mini-symbolic — full Z3/etc).
+- Handler `LDD/STR/MUL/DIV/RDTSC/CPUID/LOCKOR/VPUSHCR*` могут остаться partial.
 
 ---
 
-*Отчёт обновлён Claude Code (Sonnet 5) в рамках сессии 46b758ca на 2026-07-26 — актуализация после архитектурного прохода `cbb6186`/`d81cfbd`.*
+## 6. Ссылки на код
+
+- `Cargo.toml`, `Cargo.lock` — deps на latest stable (2026-07-26).
+- Коммиты в текущей сессии на `main`:
+  - `cbb6186` — audit-driven overhaul: real detectors, dual-bitness, hardening
+  - `d81cfbd` — CI + supply-chain security config
+  - `412a805` — sync docs + migrate deny.toml to cargo-deny schema v2
+  - `3cf2660` — Q2: captured cross-validated VMP handler taxonomy
+  - `2ce88ec` — fix clap short-flag collision on `-v` + regression-guard test
+- Auto memory (для будущих сессий): `C:\Users\Platon\.claude\projects\D--GitHub-Rust-Projects-VM-Protect-Research\memory\`.
+- Reference sources для Q2 (GPL-3.0, READ ONLY): `0xnobody/vmpattack`, `can1357/NoVmp`.
+
+---
+
+*Отчёт обновлён Claude Code (Opus 4.7) в рамках сессии 46b758ca на 2026-07-26 — актуализирован после live-запуска CLI на не-VMP бинарнике, добавлен реалистичный недельный план для следующей сессии.*
