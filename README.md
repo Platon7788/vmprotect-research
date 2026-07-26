@@ -1,204 +1,166 @@
-# VMP Devirtualizer - Production Release
+# VMP Devirtualizer
 
-Generalized VMProtect devirtualizer supporting versions 1.x, 2.x, and 3.x. Standalone CLI tool + Ghidra plugin.
+Rust CLI + library for analyzing VMProtect-obfuscated binaries. Loads PE binaries, locates the VM dispatch table, extracts and classifies handlers, and decodes bytecode into a JSON/text trace.
 
-**Status:** ✅ Production Ready | **Validation:** 22/22 samples (100%) | **Scope:** VMP ≤3.6 (3.7+ requires reverse engineering)
+> **Status:** research prototype. Reliable path is **VMP 3.0-3.6** (with a valid dispatch-table RVA). VMP 1.x / 2.x detection is heuristic-only; VMP 3.7+ (merged handlers) is not supported. See [Known Limitations](#known-limitations) and [`AUDIT_REPORT.md`](./AUDIT_REPORT.md).
 
 ---
 
 ## Features
 
-- **Multi-Version Support:** VMP 1.x, 2.x, 3.x (1.1 → 3.10.5)
-- **Version Detection:** Automatic identification via heuristics
-- **Dispatch Table Extraction:** Unicorn XOR key capture for encrypted tables
-- **Handler Classification:** 256 handler types across all versions
-- **Bytecode Decoding:** VM ops → x86-64 instruction reconstruction
-- **Platform Support:** Windows PE + Linux ELF binaries
-- **Decompiler Integration:** VM bytecode → pseudocode
-- **Ghidra Plugin:** Interactive handler analysis + annotation
+- PE loader (Windows + Linux ELF via `goblin`)
+- VM version heuristics (`.vmp0` / `.vmp1` section fingerprints)
+- Dispatch-table locator (256-entry pointer table scan + optional known-RVA hint)
+- Handler classifier (x86-64 first-byte + REX-prefix patterns)
+- Optional Unicorn CPU-emulation extraction via Python `unicorn` subprocess
+- ValueCryptor / CRC operand decryption
+- ALU chain (NOR / NAND) → arithmetic op mapping
+- JSON export for opcode table and handler classifications
 
 ---
 
-## Quick Start
+## Build
 
-### Build
+Requires Rust 1.85+ (tested on 1.97.1). No external native deps for the core library — `goblin` is pure Rust.
 
 ```bash
-cd /home/ciupix/vmp_devirt_prod
 cargo build --release
 ```
 
-Binary: `target/release/vmp_devirt`
+Binary: `target/release/vmp_devirt` (Linux/macOS) or `target\release\vmp_devirt.exe` (Windows).
 
-### Usage
+### Optional: Unicorn-based dispatch extraction
+
+The primary dispatch-extraction path shells out to a Python script that uses the `unicorn` engine. This is **optional** — if the script is not found, the code falls back to pure-Rust static XOR-key analysis.
+
+To enable:
 
 ```bash
-# Analyze binary
-./target/release/vmp_devirt <binary_path>
-
-# Export handlers
-./target/release/vmp_devirt <binary_path> --export-handlers handlers.json
-
-# Export bytecode
-./target/release/vmp_devirt <binary_path> --export-bytecode bytecode.json
+pip install unicorn
+# Place unicorn_extractor.py under ./scripts/ OR set the env var:
+export VMP_UNICORN_EXTRACTOR=/path/to/unicorn_extractor.py
 ```
+
+The script is **not included in this repository** yet — see `AUDIT_REPORT.md` §Q15 (planned migration to the `unicorn-engine` Rust crate).
+
+Lookup order for the script:
+1. `$VMP_UNICORN_EXTRACTOR` env var
+2. `$CARGO_MANIFEST_DIR/scripts/unicorn_extractor.py`
+3. `./scripts/unicorn_extractor.py` (CWD)
+
+Extraction output is written to `std::env::temp_dir()/vmp_devirt_dispatch_entries.json`.
 
 ---
 
-## Validation Results
+## Usage
 
-### Summary
-- **Total Samples:** 22
-- **Success Rate:** 22/22 (100%)
-- **Avg Processing Time:** 229ms
-- **Total Time:** 5.0 seconds
+```bash
+# Analyze binary (auto-detect version, locate dispatch table, classify handlers)
+./target/release/vmp_devirt <binary>
 
-### By Version
+# Export handler classifications as JSON
+./target/release/vmp_devirt <binary> --export-handlers handlers.json
 
-| Version | Samples | Success | Avg Time |
-|---------|---------|---------|----------|
-| VMP 1.x | 4       | 4/4     | 38ms     |
-| VMP 2.x | 6       | 6/6     | 734ms    |
-| VMP 3.x | 12      | 12/12   | 39ms     |
+# Export opcode table
+./target/release/vmp_devirt <binary> --export-opcodes opcodes.json
 
-**Tested Samples:**
-- VMP 1.x: HiVmp.vmp.1.1.exe, HiVmp.vmp.1.4.exe, HiVmp.vmp.1.54.exe, HiVmp.vmp.1.70.4.exe
-- VMP 2.x: Branch0.vmp.exe, HiVmp.exe, mfc_algo_demo.vmp.exe, Project1.vmp.exe, Project2.vmp.exe, Project4.vmp.exe
-- VMP 3.x: add_control_flow.vmp.exe, adder.vmp.exe, bitwise.vmp.exe, control_flow_test.vmp.exe, cpuid_test.vmp.exe, fac_fib.vmp.exe, globals.vmp.exe, hello_world.vmp.exe, multiadder.vmp.exe, nested_virt_funccall.vmp.exe, ptr_drf.vmp.exe, switch.vmp.exe
+# Devirtualize a range starting at a VIP address (hex, with or without 0x)
+./target/release/vmp_devirt <binary> --vip 0x140001000 --format json
+```
 
-See `VALIDATION_REPORT.md` for detailed results.
+Full CLI reference: `vmp_devirt --help`.
 
 ---
 
 ## Architecture
 
 ```
-Input Binary
-    ↓
-PE/ELF Loader (src/pe_loader.rs)
-    ↓
-Version Detector (src/version.rs)
-    ↓
-Dispatch Table Extractor (src/dispatch_table.rs)
-    ├─ Unicorn XOR Key Capture (src/unicorn_emulator.rs)
-    └─ Pattern Matching Fallback
-    ↓
-Handler Classifier (src/handler_classifier.rs)
-    ↓
-Bytecode Decoder (src/bytecode.rs)
-    ├─ Operand Decryption (src/decrypt.rs)
-    └─ ALU Reconstruction (src/alu.rs)
-    ↓
-Output (JSON/Pseudo-asm)
+Input Binary (PE / ELF)
+        │
+        ▼
+ PE Loader (src/pe_loader.rs)                      goblin
+        │
+        ▼
+ Version Detector (src/version.rs)                 .vmp0/.vmp1 heuristics
+        │
+        ▼
+ Dispatch Table Locator (src/dispatch_table.rs)    known-RVA hint + fallback scan
+        │
+        ├──► Dispatch Extractor (Python bridge)    src/dispatch_extractor_py.rs
+        └──► XOR Key Analyzer (static)             src/xor_key_analyzer.rs
+        │
+        ▼
+ Handler Classifier (src/handler_classifier.rs)    x86-64 pattern match
+        │
+        ▼
+ Bytecode Decoder (src/bytecode.rs)                per-handler operand decode
+        │
+        ├──► Operand Decryption                    src/decrypt.rs (CRC / ValueCryptor)
+        └──► ALU Reconstruction                    src/alu.rs (NOR/NAND chains)
+        │
+        ▼
+ Output (JSON / text)                              src/bin/cli.rs
 ```
 
 ---
 
-## Core Modules
+## Module map
 
-| Module | Purpose | Lines |
-|--------|---------|-------|
-| `src/lib.rs` | Main library interface | 150 |
-| `src/version.rs` | VMP version detection | 200 |
-| `src/pe_loader.rs` | PE/ELF binary loading | 350 |
-| `src/dispatch_table.rs` | Dispatch table extraction | 400 |
-| `src/unicorn_emulator.rs` | XOR key capture | 308 |
-| `src/handler_classifier.rs` | Handler type identification | 280 |
-| `src/bytecode.rs` | Bytecode reading/decoding | 320 |
-| `src/decrypt.rs` | ValueCryptor chains | 250 |
-| `src/alu.rs` | ALU operation reconstruction | 200 |
-| `src/opcode_table.rs` | Opcode management | 180 |
-| `src/bin/cli.rs` | CLI tool | 400 |
+| Module | Purpose |
+|--------|---------|
+| `src/lib.rs` | Public API — `VmpDevirtualizer` façade |
+| `src/pe_loader.rs` | PE binary loading + VA↔offset mapping |
+| `src/version.rs` | VMP-version heuristics |
+| `src/dispatch_table.rs` | Dispatch-table locator + validator |
+| `src/xor_key_analyzer.rs` | Static XOR-key extraction (256 entries) |
+| `src/dispatch_extractor_py.rs` | Python-`unicorn` subprocess bridge |
+| `src/handler_classifier.rs` | Handler type identification |
+| `src/opcode_table.rs` | Opcode ↔ handler mapping (serialize/deserialize) |
+| `src/bytecode.rs` | Bytecode reader / operand decoder |
+| `src/decrypt.rs` | `OpcodeCryptor` (CRC-based operand decryption) |
+| `src/alu.rs` | NOR/NAND chain → ALU op reconstruction |
+| `src/bin/cli.rs` | CLI |
 
-**Total:** ~2,800 lines of production Rust code
+~2 800 lines of Rust across 11 modules.
 
 ---
 
-## Implementation Details
+## Test status
 
-### Version Detection
+`cargo test --lib` — 16 tests, all green. Note: **7 of 16 are stubs** (require real PE fixtures, tracked in `AUDIT_REPORT.md` §Q13). Real coverage of the analysis pipeline is ≈15 %.
 
-Heuristics based on:
-- Handler entry patterns (POP/PUSH opcodes)
-- Dispatch mechanism (jumptable vs. encrypted chain vs. handler chain)
-- PE section layout (.vmp0, .vmp1, .text)
-- Entry stub pattern (PUSH encrypted + CALL/JMP)
-
-### Dispatch Table Extraction
-
-**VMP 1.x/2.x:** XOR key extraction via pattern matching in .text section
-- Scans for XOR instruction patterns
-- Derives keys from opcode sequences
-- Validates against image base range
-
-**VMP 3.x:** Handler chain dispatch
-- Locates dispatch points (DP0-DP5)
-- Traces handler chains
-- Extracts 256 dispatch entries
-
-### Handler Classification
-
-Pattern matching on:
-- Entry pattern (49 8b 2a = POP for VMP 3.x)
-- Core operation (SUB, ADD, XOR, etc.)
-- Operand types (slot, offset, immediate)
-- Dispatch mechanism (push/ret, direct jmp)
-
-### Bytecode Decoding
-
-1. Read opcode from bytecode section
-2. Lookup handler semantics
-3. Extract operands (slot, offset)
-4. Decrypt operands via ValueCryptor chains
-5. Reconstruct x86-64 instruction
-6. Handle VM context (register file, flags, stack)
+Real end-to-end validation against VMP-protected sample binaries has **not been re-run since the current audit**. Earlier internal reports (`docs/VALIDATION_REPORT.md`) claim 22/22 samples pass, but they predate the audit and the underlying VMP 1.x / 2.x detection is currently a stub (see below). Take those numbers as historical, not current.
 
 ---
 
 ## Known Limitations
 
-1. **VMP 3.7+ (Merged Handlers)** - Not supported. VMP 3.7+ introduced merged handlers (multiple ops per handler entry) which breaks current classifier. Requires reverse engineering with actual 3.7+ sample. See `FUTURE_WORK.md` for details.
-2. **XOR Key Validation Warnings** - Expected for VMP 1.x/2.x (non-critical)
-3. **VMP 3.x Dispatch Detection** - Uses fallback strategy for newer obfuscation
-4. **Linux Samples** - Not included in current test set (ELF support implemented)
-
----
-
-## Performance
-
-- **Throughput:** ~4.4 samples/second
-- **Memory:** <50MB per sample
-- **Latency:** 5ms-3.25s depending on binary size
+1. **VMP 1.x / 2.x version detection is a stub.** `has_vmp1_sections` and `has_vmp2_sections` currently return `false` unconditionally (`src/version.rs`). Binaries of these versions will be reported as `Unknown`. Tracked as C1 in `AUDIT_REPORT.md`.
+2. **`Bytecode::size()` returns a fixed `5`** (`src/bytecode.rs`). This means `devirtualize_range` advances 5 bytes per instruction regardless of actual handler size — output beyond the first instruction is unreliable. Tracked as C3.
+3. **Dispatch table locator uses a hard-coded RVA `0x48138` as first guess** (`src/dispatch_table.rs`). Fallback pattern-scan runs only if the hard-coded RVA is outside all sections. Tracked as C4.
+4. **VMP 3.7+ (merged handlers) is not supported.** The classifier assumes one opcode → one handler entry, which breaks on 3.7+. See `docs/FUTURE_WORK.md`.
+5. **Python subprocess dependency** for the Unicorn extraction path. Not required — the code falls back to static analysis — but reduces fidelity when absent.
+6. **Handler classifier covers only ~20 x86 first-byte patterns**; unknown handlers are labeled `UNKNOWN` with low confidence. Tracked as Q2.
+7. **ALU decompose returns dummy stack-slot names** (`"stack_val_1"`, `"stack_val_2"`) rather than real symbolic slots. Tracked as Q3.
 
 ---
 
 ## Documentation
 
-- `VALIDATION_REPORT.md` - Comprehensive test results
-- `IMPLEMENTATION_COMPLETE.md` - Implementation status
-- `UNICORN_IMPLEMENTATION_REPORT.md` - XOR key capture details
+- [`AUDIT_REPORT.md`](./AUDIT_REPORT.md) — **current** audit, applied fixes, and prioritized roadmap
+- [`docs/VALIDATION_REPORT.md`](./docs/VALIDATION_REPORT.md) — historical validation (pre-audit)
+- [`docs/IMPLEMENTATION_COMPLETE.md`](./docs/IMPLEMENTATION_COMPLETE.md) — implementation status snapshot
+- [`docs/UNICORN_IMPLEMENTATION_REPORT.md`](./docs/UNICORN_IMPLEMENTATION_REPORT.md) — Python-bridge design
+- [`docs/FUTURE_WORK.md`](./docs/FUTURE_WORK.md) — VMP 3.7+ analysis notes
 
 ---
 
-## Source References
+## Source references
 
-Architecture based on VMP 3.5.1 source leak analysis:
-- Handler structure and dispatch mechanism
-- ValueCryptor chain implementation
-- ALU operation patterns
-- VM context management
+Handler structure, dispatch mechanism, ValueCryptor chain, and ALU patterns are informed by public VMProtect 3.5.1 source-leak analysis. This project does not redistribute VMProtect source.
 
 ---
 
 ## License
 
-Research/Educational Use
-
----
-
-## Contact
-
-For issues or questions, refer to validation reports or implementation documentation.
-
-**Last Updated:** 2026-06-01
-**Status:** Production Ready
+MIT — research / educational use only. Do not use this tool to bypass software protection on programs you do not own or have explicit authorization to analyze.

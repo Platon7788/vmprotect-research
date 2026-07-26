@@ -1,9 +1,23 @@
-/// Bytecode Decoder
-/// 
-/// Parses VMP bytecode instructions
+//! Bytecode Decoder
+//!
+//! Parses VMP bytecode instructions.
 
-use crate::{PEBinary, Handler};
-use anyhow::{Result, Context};
+use crate::{Handler, PEBinary};
+use anyhow::{Context, Result};
+
+// Handler name constants, shared between operand decoding and size computation.
+const H_PUSH_REG: &str = "PUSH_REG";
+const H_PUSH_VALUE: &str = "PUSH_VALUE";
+const H_POP_MEMORY: &str = "POP_MEMORY";
+const H_ADD_REG: &str = "ADD_REG";
+const H_SUB_REG: &str = "SUB_REG";
+const H_XOR_REG: &str = "XOR_REG";
+const H_OR_REG: &str = "OR_REG";
+const H_AND_REG: &str = "AND_REG";
+const H_NOR_CHAIN: &str = "NOR_CHAIN";
+const H_NAND_CHAIN: &str = "NAND_CHAIN";
+const H_JMP: &str = "JMP";
+const H_RET: &str = "RET";
 
 /// Bytecode instruction
 pub struct Bytecode {
@@ -17,15 +31,12 @@ impl Bytecode {
         // Read max 256 bytes (longest instruction + operands)
         let data = binary.read_bytes(vip, 256)?;
 
-        Ok(Bytecode {
-            data,
-            vip,
-        })
+        Ok(Bytecode { data, vip })
     }
 
     /// Get opcode byte (at offset 0 for vtBasic)
     pub fn opcode_byte(&self) -> u8 {
-        self.data.get(0).copied().unwrap_or(0)
+        self.data.first().copied().unwrap_or(0)
     }
 
     /// Decode operands based on handler type
@@ -33,11 +44,11 @@ impl Bytecode {
         let mut operands = Vec::new();
 
         match handler.name.as_str() {
-            "PUSH_REG" => {
+            H_PUSH_REG => {
                 // 1 byte: register ID
                 operands.push(self.data.get(1).copied().unwrap_or(0) as u64);
             }
-            "PUSH_VALUE" => {
+            H_PUSH_VALUE => {
                 // Variable: 1/2/4/8 bytes immediate
                 if let Some(size) = handler.size_bytes {
                     if size > 1 {
@@ -47,23 +58,23 @@ impl Bytecode {
                     }
                 }
             }
-            "POP_MEMORY" => {
+            H_POP_MEMORY => {
                 // Memory offset encoding
                 operands.push(self.data.get(1).copied().unwrap_or(0) as u64);
             }
-            "ADD_REG" | "SUB_REG" | "XOR_REG" | "OR_REG" | "AND_REG" => {
+            H_ADD_REG | H_SUB_REG | H_XOR_REG | H_OR_REG | H_AND_REG => {
                 // Stack-based, no operand bytes
             }
-            "NOR_CHAIN" | "NAND_CHAIN" => {
+            H_NOR_CHAIN | H_NAND_CHAIN => {
                 // Chain data (encrypted)
                 operands.push(self.vip);
             }
-            "JMP" => {
+            H_JMP => {
                 // Jump target
                 let offset = self.read_imm(1, 4)?;
                 operands.push((self.vip as i64 + offset as i64) as u64);
             }
-            "RET" => {
+            H_RET => {
                 // No operands
             }
             _ => {
@@ -76,7 +87,9 @@ impl Bytecode {
 
     /// Read immediate value from bytecode
     fn read_imm(&self, offset: usize, size: usize) -> Result<u64> {
-        let bytes = self.data.get(offset..offset + size)
+        let bytes = self
+            .data
+            .get(offset..offset + size)
             .context(format!("Cannot read {} bytes at offset {}", size, offset))?;
 
         let mut value: u64 = 0;
@@ -87,10 +100,13 @@ impl Bytecode {
         Ok(value)
     }
 
-    /// Size of this instruction in bytes
-    pub fn size(&self) -> usize {
-        // Placeholder: will be determined from opcode table or CRC check
-        5
+    /// Size of this instruction in bytes: 1 opcode slot byte + operand bytes.
+    ///
+    /// The operand layout is handler-dependent; see `operand_bytes` for the
+    /// per-handler rules. Handlers that cannot be sized (unknown/invalid or
+    /// unrecognized names) return an error rather than a guessed size.
+    pub fn size(&self, handler: &Handler) -> Result<usize> {
+        Ok(1 + operand_bytes(handler)?)
     }
 
     /// Get VIP address
@@ -101,6 +117,30 @@ impl Bytecode {
     /// Get raw bytecode data
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+}
+
+/// Number of operand bytes following the opcode slot byte, per handler type.
+///
+/// Fixed-layout handlers use a hardcoded byte count. Variable-length handlers
+/// (`PUSH_VALUE`, `NOR_CHAIN`, `NAND_CHAIN`) use `handler.size_bytes` as the
+/// authoritative full instruction length (opcode + operands), so the operand
+/// count is `size_bytes - 1`. Unknown/unrecognized handlers are an error.
+fn operand_bytes(handler: &Handler) -> Result<usize> {
+    match handler.name.as_str() {
+        H_PUSH_REG | H_POP_MEMORY => Ok(1),
+        H_ADD_REG | H_SUB_REG | H_XOR_REG | H_OR_REG | H_AND_REG | H_RET => Ok(0),
+        H_JMP => Ok(4),
+        H_PUSH_VALUE | H_NOR_CHAIN | H_NAND_CHAIN => {
+            let full_size = handler
+                .size_bytes
+                .context(format!("handler '{}' has no size_bytes hint", handler.name))?;
+            full_size.checked_sub(1).context(format!(
+                "handler '{}' has invalid size_bytes: {}",
+                handler.name, full_size
+            ))
+        }
+        _ => Err(anyhow::anyhow!("cannot determine size for handler '{}'", handler.name)),
     }
 }
 
@@ -116,5 +156,83 @@ mod tests {
         };
 
         assert_eq!(bytecode.opcode_byte(), 0x11);
+    }
+
+    fn make_bytecode() -> Bytecode {
+        Bytecode {
+            data: vec![0x00; 16],
+            vip: 0x140001000,
+        }
+    }
+
+    fn make_handler(name: &str, size_bytes: Option<usize>) -> Handler {
+        Handler {
+            name: name.to_string(),
+            opcode: 0x11,
+            size_bytes,
+        }
+    }
+
+    #[test]
+    fn test_size_ret_is_one() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_RET, None);
+        assert_eq!(bytecode.size(&handler).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_size_add_reg_is_one() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_ADD_REG, None);
+        assert_eq!(bytecode.size(&handler).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_size_push_reg_is_two() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_PUSH_REG, None);
+        assert_eq!(bytecode.size(&handler).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_size_pop_memory_is_two() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_POP_MEMORY, None);
+        assert_eq!(bytecode.size(&handler).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_size_jmp_is_five() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_JMP, None);
+        assert_eq!(bytecode.size(&handler).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_size_push_value_uses_size_bytes_hint() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_PUSH_VALUE, Some(5));
+        assert_eq!(bytecode.size(&handler).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_size_push_value_without_hint_errors() {
+        let bytecode = make_bytecode();
+        let handler = make_handler(H_PUSH_VALUE, None);
+        assert!(bytecode.size(&handler).is_err());
+    }
+
+    #[test]
+    fn test_size_unknown_handler_errors() {
+        let bytecode = make_bytecode();
+        let handler = make_handler("UNKNOWN", None);
+        assert!(bytecode.size(&handler).is_err());
+    }
+
+    #[test]
+    fn test_size_invalid_handler_errors() {
+        let bytecode = make_bytecode();
+        let handler = make_handler("INVALID", None);
+        assert!(bytecode.size(&handler).is_err());
     }
 }

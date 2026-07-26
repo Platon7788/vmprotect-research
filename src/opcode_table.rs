@@ -1,9 +1,9 @@
-/// Opcode Dispatch Table
-/// 
-/// Maps opcode slot bytes to handler information
+//! Opcode Dispatch Table
+//!
+//! Maps opcode slot bytes to handler information.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// Handler information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,9 +24,7 @@ pub struct OpcodeTable {
 impl OpcodeTable {
     /// Create new opcode table
     pub fn new() -> Self {
-        OpcodeTable {
-            table: HashMap::new(),
-        }
+        OpcodeTable { table: HashMap::new() }
     }
 
     /// Register opcode → handler mapping
@@ -64,11 +62,14 @@ impl OpcodeTable {
         let mut table = OpcodeTable::new();
         for entry in entries {
             let opcode = u8::from_str_radix(&entry.opcode_byte[2..], 16)?;
-            table.register(opcode, Handler {
-                name: entry.handler,
+            table.register(
                 opcode,
-                size_bytes: Some(entry.size_bytes),
-            });
+                Handler {
+                    name: entry.handler,
+                    opcode,
+                    size_bytes: Some(entry.size_bytes),
+                },
+            );
         }
 
         Ok(table)
@@ -76,7 +77,9 @@ impl OpcodeTable {
 
     /// Save to JSON file
     pub fn to_json(&self, path: &str) -> anyhow::Result<()> {
-        let entries: Vec<_> = self.table.values()
+        let entries: Vec<_> = self
+            .table
+            .values()
             .map(|h| TraceEntry {
                 opcode_byte: format!("0x{:02x}", h.opcode),
                 handler: h.name.clone(),
@@ -111,12 +114,15 @@ mod tests {
     #[test]
     fn test_opcode_table() {
         let mut table = OpcodeTable::new();
-        
-        table.register(0x11, Handler {
-            name: "PUSH_REG".to_string(),
-            opcode: 0x11,
-            size_bytes: Some(5),
-        });
+
+        table.register(
+            0x11,
+            Handler {
+                name: "PUSH_REG".to_string(),
+                opcode: 0x11,
+                size_bytes: Some(5),
+            },
+        );
 
         assert_eq!(table.len(), 1);
         assert!(table.lookup(0x11).is_some());

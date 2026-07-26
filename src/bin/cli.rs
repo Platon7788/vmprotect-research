@@ -1,11 +1,12 @@
-/// VMP Devirtualizer CLI Tool
-/// 
-/// Command-line interface for devirtualizing VMP-protected binaries
+//! VMP Devirtualizer CLI Tool
+//!
+//! Command-line interface for devirtualizing VMP-protected binaries.
 
+use anyhow::Context;
 use clap::Parser;
 use log::info;
 use std::path::PathBuf;
-use vmp_devirt::VmpDevirtualizer;
+use vmp_devirt::{parse_hex_rva, VmpDevirtualizer};
 
 #[derive(Parser, Debug)]
 #[command(name = "vmp_devirt")]
@@ -35,6 +36,11 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     export_handlers: Option<PathBuf>,
 
+    /// Optional dispatch-table RVA hint (hex, e.g. 0x12340). If omitted or
+    /// invalid, the tool scans candidate sections.
+    #[arg(long, value_name = "RVA")]
+    dispatch_rva: Option<String>,
+
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -57,24 +63,33 @@ fn main() -> anyhow::Result<()> {
     info!("VMP Devirtualizer v0.1.0");
     info!("Loading binary: {}", args.binary.display());
 
+    // Parse the optional dispatch-table RVA hint, if provided.
+    let dispatch_rva_hint = match args.dispatch_rva.as_deref() {
+        Some(rva_str) => {
+            Some(parse_hex_rva(rva_str).with_context(|| format!("Invalid --dispatch-rva value: {}", rva_str))?)
+        }
+        None => None,
+    };
+
     // Load binary and detect version
-    let devirt = VmpDevirtualizer::new(&args.binary)?;
+    let devirt = VmpDevirtualizer::new_with_hint(&args.binary, dispatch_rva_hint)?;
     let version = devirt.version();
 
     info!("Detected VMP version: {}", version.as_str());
+    info!("Version detection confidence: {}/100", devirt.version_confidence());
 
     // Display dispatch table info
     if let Some(dt_va) = devirt.dispatch_table_va() {
         info!("Dispatch table VA: 0x{:x}", dt_va);
         info!("Handlers extracted: {}", devirt.handler_classifications().len());
-        
+
         // Display handler statistics
         let stats = devirt.handler_statistics();
         info!("Handler types found: {}", stats.len());
-        
+
         let mut sorted_stats: Vec<_> = stats.iter().collect();
         sorted_stats.sort_by(|a, b| b.1.cmp(a.1));
-        
+
         info!("Top 10 handler types:");
         for (i, (handler_type, count)) in sorted_stats.iter().take(10).enumerate() {
             info!("  {}. {} ({})", i + 1, handler_type, count);
@@ -85,25 +100,19 @@ fn main() -> anyhow::Result<()> {
 
     // Export opcode table if requested
     if let Some(export_path) = args.export_opcodes {
-        devirt.export_opcode_table(export_path.to_str().unwrap())?;
+        devirt.export_opcode_table(&export_path.to_string_lossy())?;
     }
 
     // Export handler classifications if requested
     if let Some(export_path) = args.export_handlers {
-        devirt.export_handler_classifications(export_path.to_str().unwrap())?;
+        devirt.export_handler_classifications(&export_path.to_string_lossy())?;
     }
 
     // Parse VIP address
-    let vip = if let Some(vip_str) = args.vip {
-        let vip_str = if vip_str.starts_with("0x") || vip_str.starts_with("0X") {
-            &vip_str[2..]
-        } else {
-            &vip_str
-        };
-        u64::from_str_radix(vip_str, 16)?
-    } else {
+    let vip = match args.vip.as_deref() {
+        Some(vip_str) => parse_hex_rva(vip_str).with_context(|| format!("Invalid --vip value: {}", vip_str))?,
         // Default: first code section
-        0x140001000
+        None => 0x140001000,
     };
 
     info!("Starting devirtualization at VIP: 0x{:x}", vip);

@@ -1,6 +1,6 @@
-/// ALU Reconstruction
-/// 
-/// Reconstructs arithmetic operations from NOR/NAND chains
+//! ALU Reconstruction
+//!
+//! Reconstructs arithmetic operations from NOR/NAND chains.
 
 use std::collections::HashMap;
 
@@ -39,28 +39,16 @@ impl ALUReconstructor {
         // NAND truth table: NAND(a,b) = !(a & b)
 
         // Pattern: 4x NOR → ADD (De Morgan's law composition)
-        patterns.insert(
-            vec!["NOR".to_string(); 4],
-            ALUOp::Add,
-        );
+        patterns.insert(vec!["NOR".to_string(); 4], ALUOp::Add);
 
         // Pattern: 2x NAND → AND (De Morgan's law)
-        patterns.insert(
-            vec!["NAND".to_string(), "NAND".to_string()],
-            ALUOp::And,
-        );
+        patterns.insert(vec!["NAND".to_string(), "NAND".to_string()], ALUOp::And);
 
         // Pattern: Single NOR → NOT
-        patterns.insert(
-            vec!["NOR".to_string()],
-            ALUOp::Not,
-        );
+        patterns.insert(vec!["NOR".to_string()], ALUOp::Not);
 
         // Pattern: 3x NOR → SUB
-        patterns.insert(
-            vec!["NOR".to_string(); 3],
-            ALUOp::Sub,
-        );
+        patterns.insert(vec!["NOR".to_string(); 3], ALUOp::Sub);
 
         ALUReconstructor { patterns }
     }

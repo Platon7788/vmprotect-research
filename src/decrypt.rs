@@ -1,6 +1,6 @@
-/// Operand Decryption
-/// 
-/// CRC-based operand decryption for VMP bytecode
+//! Operand Decryption
+//!
+//! CRC-based operand decryption for VMP bytecode.
 
 /// Opcode cryptor for operand decryption
 pub struct OpcodeCryptor {
@@ -52,8 +52,14 @@ impl OpcodeCryptor {
     pub fn decrypt_value_u64(&mut self, encrypted: &[u8; 8]) -> u64 {
         let decrypted = self.decrypt_operands(encrypted);
         u64::from_le_bytes([
-            decrypted[0], decrypted[1], decrypted[2], decrypted[3],
-            decrypted[4], decrypted[5], decrypted[6], decrypted[7],
+            decrypted[0],
+            decrypted[1],
+            decrypted[2],
+            decrypted[3],
+            decrypted[4],
+            decrypted[5],
+            decrypted[6],
+            decrypted[7],
         ])
     }
 
@@ -80,12 +86,13 @@ mod tests {
 
     #[test]
     fn test_decrypt_operand() {
-        let cryptor = OpcodeCryptor::new();
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0xDEAD_BEEFu64);
         let encrypted = 0x42u8;
         let decrypted = cryptor.decrypt_operand(encrypted, 1);
 
-        // Value should change based on CRC
-        assert_ne!(decrypted, encrypted);
+        // XOR with low byte of CRC (0xEF): 0x42 ^ 0xEF = 0xAD
+        assert_eq!(decrypted, 0x42 ^ 0xEF);
     }
 
     #[test]

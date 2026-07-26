@@ -1,1 +1,41 @@
+# Rust build artifacts
 /target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Windows debug/PDB
+*.pdb
+*.exp
+*.ilk
+
+# IDE / editor
+/.vs/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local run artifacts (VMP devirt outputs / temp)
+dispatch_table_info.json
+handlers.json
+bytecode.json
+/vmp_devirt_dispatch_entries.json
+
+# Secrets / env (must never commit)
+.env
+.env.*
+*.key
+*.pem
+
+# Claude Code / ruflo local state (per-user, not shared)
+/.claude/
+/.claude-flow/
+/.swarm/
+/.mcp.json
+
