@@ -10,13 +10,14 @@
 | Метрика | Значение |
 |---|---|
 | Строк Rust | ~2 800 |
-| Модулей | 10 |
-| Тестов | 16 pass / 0 fail (было 15/1) |
-| Clippy warnings | 0 (было 24) |
+| Модулей | 12 |
+| Тестов | 66 pass / 0 fail (было 16/0) |
+| Clippy warnings | 0 (`cargo clippy --all-targets`) |
 | Build (dev + release) | ✓ |
-| Deps latest | ✓ (goblin 0.7→0.10.7, clap 4.4→4.6.4, serde 1.0→1.0.229, …) |
+| CI | ✓ `.github/workflows/ci.yml` — Windows + Linux матрица (build/test/clippy/fmt) + отдельный `security-audit` job (`cargo audit` + `cargo deny check`) |
+| Deps latest | ✓ (goblin 0.10.7, clap 4.6.4, serde 1.0.229, serde_json 1.0.151, anyhow 1.0.104, log 0.4.33, env_logger 0.11.11) |
 
-**Быстрые фиксы применены** (см. раздел 1). **Остальное** — в разделе 2 (что доделывать).
+**Быстрые фиксы применены** (см. раздел 1). Начиная с этой сессии раздел 1 также включает архитектурные фиксы C1/C3/C4/X1 и инфраструктурные Q6/Q7/Q10/Q11, ранее числившиеся в разделе 2 — они landed в коммитах `cbb6186` (audit-driven overhaul: real detectors, dual-bitness, hardening) и `d81cfbd` (CI + supply-chain security) на `main`. **Остальное** — в разделе 2 (что доделывать).
 
 ---
 
@@ -42,60 +43,36 @@
 
 ---
 
+## 1a. Что доделано в архитектурном проходе (`cbb6186`, `d81cfbd`) ✓
+
+| ID | Файл | Что сделано |
+|---|---|---|
+| C1 | `src/version.rs`, `src/version_matchers.rs` (новый) | `has_vmp1_sections`/`has_vmp2_sections`-заглушки заменены на скоринговый эвристический каскад: entry-stub байт-паттерны (pushad+mov esi,imm32 для 1.x; push+call/jmp для 2.x/3.x), layout `.vmp0`/`.vmp1`, RWX-характеристики entry-секции, строковый маркер `"VMProtect"`. `VersionDetector::detect` теперь возвращает `(VmpVersion, u8 confidence)` вместо просто `VmpVersion`. |
+| C3 | `src/bytecode.rs` | `size(&self) -> usize` (хардкод `5`) заменён на `size(&self, handler: &Handler) -> Result<usize>`, вычисляемый из реального operand-layout хендлера (`operand_bytes`). `devirtualize_range` в `lib.rs` теперь шагает по реальному размеру инструкции. |
+| C4 | `src/dispatch_table.rs` | Хардкод RVA `0x48138` убран. `DispatchTableLocator::locate(binary, hint_rva: Option<u64>)` — хинт валидируется тем же порогом (200/256 валидных указателей), что и fallback pattern-scan; при провале хинта или его отсутствии сразу идёт скан секций. CLI-флаг `--dispatch-rva <RVA>` добавлен в `src/bin/cli.rs`. |
+| X1 | `src/pe_loader.rs`, `src/xor_key_analyzer.rs`, `src/handler_classifier.rs` | Новый `enum Bitness { X86, X64 }`, определяется из `pe.is_64`. Прокинут в `XorKeyAnalyzer` (entry_size 4 vs 8, XOR-паттерны с/без REX) и `HandlerClassifier` (ветка REX-префикса `0x48` теперь gated на `Bitness::X64`; на x86 `0x48` — это `DEC EAX`, раньше классифицировался неверно). Проверено юнит-тестами на обоих bitness, live x86 VMP-сэмпл не прогонялся. |
+| S7 | `src/pe_loader.rs`, `src/handler_classifier.rs` | Новый `PEBinary::read_bytes_up_to(va, max) -> Result<Vec<u8>>` — читает `min(max, remaining-in-section)` вместо жёстких 100 байт. `HandlerClassifier::classify` использует его, короткие handlers у границы секции больше не помечаются `UNREADABLE`. |
+| Q7 | `src/unicorn_emulator.rs` → `src/xor_key_analyzer.rs`, `src/unicorn_dispatch_extractor.rs` → `src/dispatch_extractor_py.rs` | Файлы и типы переименованы: `UnicornEmulator` → `XorKeyAnalyzer`, `UnicornDispatchExtractor` → `DispatchExtractorPy`. `mod`/`pub use` в `lib.rs` и README обновлены. |
+| Q10 | `.github/workflows/ci.yml`, `rustfmt.toml`, `clippy.toml` | CI добавлен: build/test/clippy/fmt на Windows + Linux матрице, отдельный `security-audit` job (`cargo audit` + `cargo deny check`). `rustfmt.toml`/`clippy.toml` закоммичены, `cargo fmt --all` применён по всему проекту. |
+| Q11 | `docs/` | `IMPLEMENTATION_COMPLETE.md`, `VALIDATION_REPORT.md`, `UNICORN_IMPLEMENTATION_REPORT.md`, `FUTURE_WORK.md` перенесены из корня в `docs/`. |
+| — | все модули | `cargo fmt --all` применён проектно-широко после переименований/рефакторинга — стиль унифицирован. |
+| тесты | все модули | Юнит-тесты выросли с 16 до 66 (детекция версии, dual-bitness classifier, `read_bytes_up_to`, dispatch-table hint validation, `Bytecode::size` per-handler, `parse_hex_rva`, и т.д.). |
+
+**Коммиты:** `cbb6186` (audit-driven overhaul: real detectors, dual-bitness, hardening), `d81cfbd` (CI + supply-chain security config) на `main`.
+
+---
+
 ## 2. Что осталось (нельзя быстро — нужен реверс / образцы / архитектурное время)
 
 Здесь приоритет: 🔴 critical · 🟠 high · 🟡 medium · ⚪ nice-to-have.
 
-### 🔴 C1 — Реализовать реальную детекцию VMP 1.x / 2.x
-
-**Где:** `src/version.rs:129-141` — `has_vmp1_sections`, `has_vmp2_sections` → всегда `Ok(false)`.
-
-**Проблема:** README заявляет "22/22 samples pass" по всем версиям (4 VMP1 + 6 VMP2 + 12 VMP3). Код же **никогда** не может вернуть `Vmp1` или `Vmp2` — вся статистика для этих версий фиктивна.
-
-**Что нужно:**
-- Собрать реальные VMP 1.1 / 1.4 / 1.54 / 1.70 sample-бинарники и VMP 2.x sample-бинарники (в README перечислены имена файлов, они где-то лежали).
-- Проанализировать какие entry-stub signature / section-layout / dispatch-mechanism отличают их (VMP 1.x — обычно нет отдельных `.vmp*` секций, всё в `.text`; VMP 2.x — `.vmp0` без `.vmp1`).
-- Написать хотя бы entry-point signature match (первые 16-32 байта после `AddressOfEntryPoint`) — известны для 1.x/2.x.
-
-**Оценка:** 1-2 дня при наличии образцов.
-
----
-
-### 🔴 C3 — Реализовать реальный `Bytecode::size()`
-
-**Где:** `src/bytecode.rs:92-94` — `fn size(&self) -> usize { 5 }`.
-
-**Проблема:** `VmpDevirtualizer::devirtualize_range` итерирует `vip += instr.size` (см. `src/lib.rs:200-207`). При хардкоде 5 весь дизассемблер шагает по 5 байт независимо от opcode — **весь выхлоп после первой инструкции — мусор**.
-
-**Что нужно:**
-- Каждый handler имеет свой набор операндов (`PUSH_REG` — 1 байт, `PUSH_VALUE` — 1/2/4/8, `JMP` — 4, и т.д.).
-- Логика уже частично разложена в `decode_operands` (`src/bytecode.rs:32-72`) — вынести подсчёт размера туда же и возвращать `usize` из `decode_operands`, а `size()` пересчитать через `1 + operand_bytes`.
-- Учесть variable-length инструкции (VMP `PUSH_VALUE` — 4 варианта размера, определяется handler variant slot).
-
-**Оценка:** 2-3 дня с покрытием тестами.
-
----
-
-### 🔴 C4 — Убрать hardcoded RVA `0x48138` в dispatch table locator
-
-**Где:** `src/dispatch_table.rs:20`.
-
-**Проблема:** "Generalized VMProtect devirtualizer" по факту жёстко привязан к RVA одного конкретного бинарника. Fallback-scan (`find_dispatch_pattern`) есть, но он никогда не вызывается на "known-RVA" пути — просто вернёт `dispatch_table_va` из этого RVA, если он попадёт в валидную секцию.
-
-**Что нужно:**
-- Сделать `known_rva` опциональным (`Option<u64>`), передаваемым через CLI-флаг `--dispatch-rva 0x48138` или из sidecar JSON.
-- Дефолт — сразу вызывать `find_dispatch_pattern` на всех кандидатных секциях.
-- Возможно кэшировать успешные RVA per-binary-hash в sidecar (`.vmp_devirt_cache.json`).
-
-**Оценка:** 4-6 часов.
-
----
+C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1a. Ниже — то, что реально осталось.
 
 ### 🟠 Q2 — Расширить `HandlerClassifier` (multi-byte fingerprints)
 
-**Где:** `src/handler_classifier.rs:64-227`.
+**Где:** `src/handler_classifier.rs::analyze_bytecode`.
 
-**Проблема:** сейчас match только по первому байту → покрывает ~20 x86-паттернов; всё остальное — `UNKNOWN` (confidence 30). Для реальных VMP-handlers надо смотреть:
+**Проблема:** сейчас match только по первому байту (плюс bitness-gate на REX-префикс, см. X1 в разделе 1a) → покрывает ~20 x86-паттернов из 256 opcode-слотов; всё остальное — `UNKNOWN` (confidence 30). Таксономия к тому же x86-инструкционная (`MOV_REG_REG`, `ADD_REG_REG`, …), а не VMP-семантическая (`PUSH_VALUE`, `NOR_CHAIN`, …) — маппинг x86→VMP-семантика ещё предстоит. Для реальных VMP-handlers надо смотреть:
 - REX-prefix + opcode + ModR/M (`48 8B ??` → LEA/MOV в зависимости от ModR/M);
 - специфические VMP-паттерны handler-entry (49 8B 2A для VMP 3.x POP, и т.д. — есть в README).
 
@@ -123,96 +100,31 @@
 
 ### 🟠 Q4 — Расширить `Bytecode::decode_operands`
 
-**Где:** `src/bytecode.rs:32-72`. Покрывает 8 handler names (`PUSH_REG`, `PUSH_VALUE`, `POP_MEMORY`, `ADD_REG` и др.). Всё остальное — `_ => {}` (silent no-op).
+**Где:** `src/bytecode.rs::decode_operands`. Покрывает 8 handler-family names (`PUSH_REG`, `PUSH_VALUE`, `POP_MEMORY`, `ADD_REG`/`SUB_REG`/`XOR_REG`/`OR_REG`/`AND_REG`, `NOR_CHAIN`/`NAND_CHAIN`, `JMP`, `RET`). Всё остальное — `_ => {}` (silent no-op).
 
-**Что нужно:** exhaustive match по всем handler-type строкам, генерируемым `handler_classifier::analyze_bytecode`. Иначе валидные handlers молча теряются.
+**Что нужно:** exhaustive match по всем handler-type строкам, генерируемым `handler_classifier::analyze_bytecode` (сейчас это x86-инструкционные имена вроде `MOV_REG_REG`, не совпадающие 1:1 с VMP-семантическими именами, которые ожидает `decode_operands` — согласовать после Q2). Иначе валидные handlers молча теряются.
 
 **Оценка:** параллельно с Q2, ~1 день.
 
 ---
 
-### 🟠 S7 — Bounds-check в `handler_classifier`
-
-**Где:** `src/handler_classifier.rs:38` — `binary.read_bytes(handler_va, 100)`.
-
-**Проблема:** если handler лежит близко к концу секции и до конца < 100 байт — `read_bytes` вернёт ошибку и весь handler будет `UNREADABLE`, теряя валидные короткие handlers.
-
-**Что нужно:** сначала спрашивать доступный размер секции, читать `min(100, remaining)`. После фиксов S1/S4 в `pe_loader.rs` это будет проще — `read_bytes` больше не паникует, но возвращает Err на неполном чтении. Нужен новый метод `read_bytes_up_to(va, max) -> Vec<u8>`.
-
-**Оценка:** 1-2 часа.
-
----
-
-### 🟡 Q7 — Переименовать `unicorn_*` (misleading naming)
-
-**Проблема:**
-- `unicorn_emulator.rs` не эмулирует — делает static pattern matching. → `xor_key_analyzer.rs`.
-- `unicorn_dispatch_extractor.rs` шеллит в Python subprocess. → `python_extractor_bridge.rs` или `dispatch_extractor_py.rs`.
-
-**Что нужно:** переименовать файлы, поправить `mod` и `pub use` в `lib.rs`, обновить documentation. Ломающее API изменение — вынести на next-minor-bump. В `unicorn_emulator.rs` уже добавлен `NOTE` в module doc про план переименования.
-
-**Оценка:** 30 мин + записка в CHANGELOG.
-
----
-
 ### 🟡 Q1 + Q13 — Real integration tests + fixtures
 
-**Проблема:** 7 из 16 тестов — заглушки (`// Stub: requires a real PE fixture`). Реальное покрытие ≈ 15%.
+**Проблема:** 66 unit-тестов покрывают PE loader, version detector, dispatch-table locator, handler classifier и bytecode sizing — но все на **in-memory синтетических PE32/PE32+ фикстурах**, собранных вручную в тестах (`build_minimal_pe`-стиль хелперы). Ни одного реального VMP-protected сэмпла в тестовом наборе нет.
 
 **Что нужно:**
-- Директория `tests/fixtures/` с минимальным ассемблерным `.exe` (собрать через `link.exe /entry:main /subsystem:console`) — 4-8 KB достаточно для покрытия PE loader / va_to_offset / read_bytes.
+- Директория `tests/fixtures/` с минимальным ассемблерным `.exe` (собрать через `link.exe /entry:main /subsystem:console`) — 4-8 KB достаточно для покрытия PE loader / va_to_offset / read_bytes на настоящем файле (а не только in-memory buffer).
 - Один настоящий VMP-protected sample (можно с VMProtect Community/Free) в `tests/fixtures/vmp3_hello.exe` (проверить лицензию!).
-- `tests/pe_loader.rs`, `tests/dispatch_table.rs` — integration-тесты.
+- `tests/pe_loader.rs`, `tests/dispatch_table.rs` — integration-тесты, читающие файлы с диска.
 - Property-tests (`proptest` crate) для `OpcodeCryptor::decrypt`/`update_crc` (round-trip invariants).
 
 **Оценка:** 3-5 дней.
 
 ---
 
-### 🟡 Q9 — Обновить `README.md`
-
-**Проблемы:**
-- L28: `cd /home/ciupix/vmp_devirt_prod` — чужой пользователь.
-- L50-62: заявлено 22/22 samples pass — противоречит `C1` (VMP1/2 детекция всегда `false`).
-- L157-160: "Known Limitations" не упоминает hardcoded RVA `0x48138`.
-- Windows не документирован (build/run инструкции только Linux).
-
-**Что нужно:** переписать секции `Quick Start`, `Validation Results` (с фактическими цифрами по VMP3 после исправлений), `Known Limitations` (добавить hardcoded RVA + VMP1/2 stub + Python subprocess dependency).
-
-**Оценка:** 2-3 часа.
-
----
-
-### 🟡 Q10 — Setup CI + supply-chain security
-
-**Отсутствует:**
-- `.github/workflows/ci.yml` — `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` на Windows + Linux матрице.
-- `cargo audit` (RustSec DB) и `cargo deny` (лицензии + deps allow-list) — установить и включить в CI.
-- `rustfmt.toml` + `clippy.toml` — единый стиль.
-
-**Что нужно:** типовой ci.yml + два конфига. Дёшево, но требует ~1 день на отладку матрицы.
-
----
-
-### 🟡 Q11 — Реорганизация корневой директории
-
-**Проблема:** в корне ~35 KB отчётной документации:
-- `IMPLEMENTATION_COMPLETE.md` (12.6 KB)
-- `VALIDATION_REPORT.md` (10.5 KB)
-- `UNICORN_IMPLEMENTATION_REPORT.md` (8.7 KB)
-- `FUTURE_WORK.md` (4.7 KB)
-
-**Что нужно:**
-- Создать `docs/` и перенести туда всё кроме `README.md`, `AUDIT_REPORT.md`, `Cargo.toml`, `Cargo.lock`.
-- Расширить `.gitignore` — сейчас там только `/target` (default), не хватает `*.pdb`, `.vs/`, `.idea/`, `*.swp`, `**/*.rs.bk`, локальные dispatch_table_info.json.
-
-**Оценка:** 30 мин.
-
----
-
 ### ⚪ Q14 — Sanity против command-injection (S-lite)
 
-**Где:** `src/unicorn_dispatch_extractor.rs` — `Command::new(python_bin).arg(&script_path).arg(binary_path).arg(...)`. `binary_path` — это `binary.path` (сохранённый `path.as_ref().to_string_lossy()` из `pe_loader.rs`).
+**Где:** `src/dispatch_extractor_py.rs` — `Command::new(python_bin).arg(&script_path).arg(binary_path).arg(...)`. `binary_path` — это `binary.path` (сохранённый `path.as_ref().to_string_lossy()` из `pe_loader.rs`).
 
 **Проблема:** пробелы/quotes в пути к бинарнику передадутся Python как аргумент корректно (мы используем `Command::arg`, не shell). Command injection не грозит. Но:
 - Стоит валидировать что `binary_path` существует перед вызовом (сейчас Python упадёт с внутренней ошибкой).
@@ -224,7 +136,7 @@
 
 ### ⚪ Q15 — Убрать зависимость от Python subprocess
 
-**Идея:** заменить `unicorn_extractor.py` на прямой crate `unicorn-engine` (Rust bindings). Устраняет:
+**Идея:** заменить `unicorn_extractor.py` (скрипт всё ещё не входит в репозиторий) на прямой crate `unicorn-engine` (Rust bindings). Устраняет:
 - необходимость Python в runtime,
 - JSON-сериализацию через temp-файл (медленно),
 - проблему "script not found".
@@ -235,36 +147,62 @@
 
 ---
 
+### ⚪ X-new — Подключить `OpcodeCryptor` / `ALUReconstructor` к основному пайплайну
+
+**Где:** `src/decrypt.rs` (`OpcodeCryptor`, CRC-based operand decryption), `src/alu.rs` (`ALUReconstructor`, NOR/NAND → ALU op reconstruction).
+
+**Проблема:** оба модуля реализованы и покрыты юнит-тестами, но не вызываются из `VmpDevirtualizer::decode_instruction` / `devirtualize_range` в `src/lib.rs` — мёртвый код с точки зрения пайплайна.
+
+**Что нужно:** дождаться Q2 (VMP-семантическая таксономия у `HandlerClassifier`), затем подключить `OpcodeCryptor` к операндам NOR/NAND-хендлеров и `ALUReconstructor` к декодированию цепочек в `decode_instruction`.
+
+**Оценка:** зависит от Q2/Q3, отдельно — 1-2 дня интеграции.
+
+---
+
+### ⚪ X-new — End-to-end валидация на реальных x86 (32-бит) VMP-сэмплах
+
+**Где:** dual-bitness код (`Bitness` в `pe_loader.rs`, `xor_key_analyzer.rs`, `handler_classifier.rs`, см. X1 в разделе 1a).
+
+**Проблема:** dual-bitness путь компилируется и проходит структурные юнит-тесты (bitness-gated REX handling, entry-size 4 vs 8), но ни один живой 32-битный VMP-protected бинарник ещё не анализировался этим кодом end-to-end.
+
+**Что нужно:** собрать/найти VMP-protected x86 (не x64) sample и прогнать полный пайплайн (`VmpDevirtualizer::new` → classify → devirtualize_range), сравнить с ожидаемым.
+
+**Оценка:** 1 день при наличии образца.
+
+---
+
 ## 3. Приоритизированный roadmap
 
-### Спринт 1 (1 неделя) — «Честный релиз 0.2»
-- C1, C3, C4 — устранить архитектурную ложь: реальный VMP1/2 detect, реальный `size()`, убрать hardcoded RVA.
-- Q9 — переписать README с фактическими цифрами.
-- Q11 — реорганизовать корень + расширить .gitignore.
+### Спринт 1 (завершён) — «Честный релиз 0.2»
+- ~~C1, C3, C4~~ — устранена архитектурная ложь: реальный VMP1/2 detect (скоринговый каскад), реальный `size()`, убран hardcoded RVA. См. `cbb6186`.
+- ~~Q9~~ — README переписан с фактическими цифрами.
+- ~~Q11~~ — корень реорганизован, отчёты перенесены в `docs/`.
 
-### Спринт 2 (1-2 недели) — «Полное покрытие handlers»
-- Q2, Q4 — реальный table-driven классификатор + exhaustive `decode_operands`.
-- Q3 — символический ALU decompose.
-- S7 — bounds-safe чтение handler bytes.
+### Спринт 2 (частично завершён) — «Полное покрытие handlers»
+- Q2, Q4 — **осталось**: реальный table-driven VMP-семантический классификатор + exhaustive `decode_operands`.
+- Q3 — **осталось**: символический ALU decompose (сейчас dummy stack-slot имена).
+- ~~S7~~ — bounds-safe чтение handler bytes сделано (`read_bytes_up_to`). См. `cbb6186`.
 
-### Спринт 3 (1 неделя) — «Инфраструктура»
-- Q10 — CI + cargo-audit + cargo-deny + rustfmt/clippy configs.
-- Q1/Q13 — integration tests + fixtures.
-- Q7 — переименование `unicorn_*` (в minor-bump).
+### Спринт 3 (завершён) — «Инфраструктура»
+- ~~Q10~~ — CI + cargo-audit + cargo-deny + rustfmt/clippy configs добавлены. См. `d81cfbd`.
+- Q1/Q13 — **осталось**: integration tests + real-file/real-sample fixtures (текущие 66 тестов — все in-memory синтетика).
+- ~~Q7~~ — `unicorn_*` переименованы (`xor_key_analyzer.rs`, `dispatch_extractor_py.rs`). См. `cbb6186`.
 
-### Спринт 4 (2-3 недели) — «Полировка»
+### Спринт 4 (2-3 недели) — «Полировка» (не начат)
 - Q15 — оценка миграции на Rust `unicorn-engine`.
 - Q14 — command-injection sanity + reproducibility logging.
+- X-new — подключить `OpcodeCryptor`/`ALUReconstructor` к пайплайну (после Q2/Q3).
+- X-new — end-to-end валидация на реальном x86 VMP-сэмпле.
 - Documentation pass (rustdoc examples для публичных API).
 
 ---
 
-## 4. Ссылки на код в этой сессии
+## 4. Ссылки на код
 
-- Cargo.toml `deps` bumps: [D:\GitHub\Rust_Projects\VM-Protect-Research\Cargo.toml](./Cargo.toml)
-- Быстрые фиксы commit-ready (после `git diff`).
+- Cargo.toml `deps`: [D:\GitHub\Rust_Projects\VM-Protect-Research\Cargo.toml](./Cargo.toml)
+- Архитектурный проход: коммиты `cbb6186` (audit-driven overhaul: real detectors, dual-bitness, hardening), `d81cfbd` (CI + supply-chain security) на `main`.
 - Auto memory ruflo: `C:\Users\Platon\.claude\projects\D--GitHub-Rust-Projects-VM-Protect-Research\memory\` — читается в будущие сессии.
 
 ---
 
-*Отчёт сгенерирован Claude Code (Opus 4.7) в рамках сессии 46b758ca на 2026-07-26.*
+*Отчёт обновлён Claude Code (Sonnet 5) в рамках сессии 46b758ca на 2026-07-26 — актуализация после архитектурного прохода `cbb6186`/`d81cfbd`.*

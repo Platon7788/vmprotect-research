@@ -8,10 +8,10 @@ Rust CLI + library for analyzing VMProtect-obfuscated binaries. Loads PE binarie
 
 ## Features
 
-- PE loader (Windows + Linux ELF via `goblin`)
-- VM version heuristics (`.vmp0` / `.vmp1` section fingerprints)
-- Dispatch-table locator (256-entry pointer table scan + optional known-RVA hint)
-- Handler classifier (x86-64 first-byte + REX-prefix patterns)
+- PE loader (Windows + Linux ELF via `goblin`), with dual-bitness support (x86 PE32 + x86-64 PE32+)
+- VM version heuristics — scored rule cascade over entry-stub bytes, `.vmp0`/`.vmp1` section layout, and auxiliary markers, returning a version + 0-100 confidence
+- Dispatch-table locator (256-entry pointer table scan + optional `--dispatch-rva` hint)
+- Handler classifier (x86 / x86-64 first-byte + REX-prefix patterns, bitness-gated)
 - Optional Unicorn CPU-emulation extraction via Python `unicorn` subprocess
 - ValueCryptor / CRC operand decryption
 - ALU chain (NOR / NAND) → arithmetic op mapping
@@ -110,7 +110,8 @@ Input Binary (PE / ELF)
 |--------|---------|
 | `src/lib.rs` | Public API — `VmpDevirtualizer` façade |
 | `src/pe_loader.rs` | PE binary loading + VA↔offset mapping |
-| `src/version.rs` | VMP-version heuristics |
+| `src/version.rs` | VMP-version heuristics (scored rule cascade) |
+| `src/version_matchers.rs` | Entry-stub / section-layout pattern matchers used by `version.rs` (private) |
 | `src/dispatch_table.rs` | Dispatch-table locator + validator |
 | `src/xor_key_analyzer.rs` | Static XOR-key extraction (256 entries) |
 | `src/dispatch_extractor_py.rs` | Python-`unicorn` subprocess bridge |
@@ -121,27 +122,38 @@ Input Binary (PE / ELF)
 | `src/alu.rs` | NOR/NAND chain → ALU op reconstruction |
 | `src/bin/cli.rs` | CLI |
 
-~2 800 lines of Rust across 11 modules.
+~2 800 lines of Rust across 13 files (12 `src/*.rs` modules + `src/bin/cli.rs`).
 
 ---
 
 ## Test status
 
-`cargo test --lib` — 16 tests, all green. Note: **7 of 16 are stubs** (require real PE fixtures, tracked in `AUDIT_REPORT.md` §Q13). Real coverage of the analysis pipeline is ≈15 %.
+`cargo test --lib` — 66 tests, all green (up from 16). `cargo clippy --all-targets` — 0 warnings. CI (`.github/workflows/ci.yml`) now runs build/test/clippy/fmt on a Windows + Linux matrix, plus a separate `cargo audit` + `cargo deny` security-audit job.
 
-Real end-to-end validation against VMP-protected sample binaries has **not been re-run since the current audit**. Earlier internal reports (`docs/VALIDATION_REPORT.md`) claim 22/22 samples pass, but they predate the audit and the underlying VMP 1.x / 2.x detection is currently a stub (see below). Take those numbers as historical, not current.
+Real end-to-end validation against VMP-protected sample binaries has **not been re-run since the current audit**. Earlier internal reports (`docs/VALIDATION_REPORT.md`) claim 22/22 samples pass, but they predate the audit. Take those numbers as historical, not current. VMP 1.x / 2.x detection is no longer a stub (see below), but no live x86 VMP-protected binary has been analyzed end-to-end with the current code.
+
+---
+
+## Development
+
+```bash
+cargo build                        # debug build
+cargo test --lib                   # 66 unit tests
+cargo clippy --all-targets         # 0 warnings (CI enforces -D warnings)
+cargo fmt --check                  # style is enforced project-wide (rustfmt.toml)
+```
+
+CI runs all four on every push/PR (`.github/workflows/ci.yml`), on a Windows + Linux matrix, with a separate `security-audit` job running `cargo audit` and `cargo deny check` (config: `deny.toml`).
 
 ---
 
 ## Known Limitations
 
-1. **VMP 1.x / 2.x version detection is a stub.** `has_vmp1_sections` and `has_vmp2_sections` currently return `false` unconditionally (`src/version.rs`). Binaries of these versions will be reported as `Unknown`. Tracked as C1 in `AUDIT_REPORT.md`.
-2. **`Bytecode::size()` returns a fixed `5`** (`src/bytecode.rs`). This means `devirtualize_range` advances 5 bytes per instruction regardless of actual handler size — output beyond the first instruction is unreliable. Tracked as C3.
-3. **Dispatch table locator uses a hard-coded RVA `0x48138` as first guess** (`src/dispatch_table.rs`). Fallback pattern-scan runs only if the hard-coded RVA is outside all sections. Tracked as C4.
-4. **VMP 3.7+ (merged handlers) is not supported.** The classifier assumes one opcode → one handler entry, which breaks on 3.7+. See `docs/FUTURE_WORK.md`.
-5. **Python subprocess dependency** for the Unicorn extraction path. Not required — the code falls back to static analysis — but reduces fidelity when absent.
-6. **Handler classifier covers only ~20 x86 first-byte patterns**; unknown handlers are labeled `UNKNOWN` with low confidence. Tracked as Q2.
-7. **ALU decompose returns dummy stack-slot names** (`"stack_val_1"`, `"stack_val_2"`) rather than real symbolic slots. Tracked as Q3.
+1. **VMP 3.7+ (merged handlers) is not supported.** The classifier assumes one opcode → one handler entry, which breaks on 3.7+. See `docs/FUTURE_WORK.md`.
+2. **Handler classifier covers only ~20 x86 first-byte patterns** out of the 256-opcode space; unknown handlers are labeled `UNKNOWN` with low confidence. The taxonomy is also still x86-instruction-level (`MOV_REG_REG`, `ADD_REG_REG`, ...), not VMP-semantic (`PUSH_VALUE`, `NOR_CHAIN`, ...) — mapping x86 patterns to VMP semantics is future work. Tracked as Q2.
+3. **ALU decompose returns dummy stack-slot names** (`"stack_val_1"`, `"stack_val_2"`) rather than real symbolic slots, and isn't wired into the main devirtualization pipeline. Tracked as Q3.
+4. **Python subprocess dependency** for the Unicorn extraction path. Not required — the code falls back to static XOR-key analysis — but the `unicorn_extractor.py` script itself is not bundled in this repository yet (see `AUDIT_REPORT.md` §Q15).
+5. **Dual-bitness support (x86 PE32 + x86-64 PE32+) is new and only validated structurally.** `Bitness`-aware handling exists in the XOR key analyzer and handler classifier (entry size, XOR-immediate encoding, REX-prefix gating), and is covered by in-memory unit tests for both bitnesses, but has not been exercised end-to-end against a real 32-bit VMP-protected binary.
 
 ---
 
