@@ -3,6 +3,7 @@
 //! Classifies VMP handlers by analyzing their bytecode patterns.
 
 use crate::handler_semantic::{SemanticMatcher, VmpSemantic};
+use crate::junk_stripper;
 use crate::{Bitness, PEBinary};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -62,13 +63,29 @@ impl HandlerClassifier {
             }
         };
 
-        // Analyze bytecode patterns (x86-instruction-level fallback).
-        let (handler_type, size, confidence) = Self::analyze_bytecode(&bytecode, bitness);
+        // Junk-code pre-pass: VMP 3.x wraps handler emissions in a
+        // "0-3 junk instruction" envelope (mov reg,reg / lea reg,[reg]
+        // / add reg,0 / adjacent push-pop pairs / stray segment
+        // prefixes / NOPs) whose presence between the real load /
+        // adjust / store steps degrades both the x86-instruction
+        // fallback and the VMP-level semantic matcher. Running the
+        // stripper first restores signature reliability for both.
+        let cleaned = junk_stripper::strip_junk(&bytecode, bitness);
+
+        // `handler_type` and `confidence` derive from the cleaned body
+        // — a leading NOP or stray segment prefix must not flip the
+        // first-byte switch onto the wrong arm.
+        let (handler_type, _cleaned_size, confidence) = Self::analyze_bytecode(&cleaned, bitness);
+        // `size`, however, is what the caller uses to walk on-disk
+        // handlers, so it must reflect the ORIGINAL bytecode as read:
+        // junk instructions ARE part of the handler on disk. We recompute
+        // it against the raw body's first opcode.
+        let (_raw_type, size, _raw_conf) = Self::analyze_bytecode(&bytecode, bitness);
 
         // VMP-level semantic classifier. Runs independently of the x86
         // fallback so the two layers can disagree without either
         // silently masking the other -- consumers see both.
-        let vmp_semantic = SemanticMatcher::classify(&bytecode, bitness);
+        let vmp_semantic = SemanticMatcher::classify(&cleaned, bitness);
 
         Ok(HandlerClassification {
             va: handler_va,

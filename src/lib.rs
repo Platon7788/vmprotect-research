@@ -25,6 +25,7 @@ pub mod dispatch_extractor_py;
 pub mod dispatch_table;
 pub mod handler_classifier;
 pub mod handler_semantic;
+pub mod junk_stripper;
 pub mod opcode_table;
 pub mod pe_loader;
 pub mod protector;
