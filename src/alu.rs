@@ -58,11 +58,17 @@ impl ALUReconstructor {
         self.patterns.get(chain).cloned()
     }
 
-    /// Decompose NOR/NAND chain to operands and operation
+    /// Decompose NOR/NAND chain to operands and operation.
+    ///
+    /// The two operands are named after the VM-stack slots VMP's ALU chains
+    /// consume from: the top two entries of the VM stack (VSP-relative).
+    /// Slot names are hardcoded to the x64 convention (`vsp+0`, `vsp+8`,
+    /// 8-byte slots); a bitness-aware variant (x86 uses 4-byte slots, i.e.
+    /// `vsp+0`/`vsp+4`) is left as future work — see AUDIT_REPORT.md Q3.
     pub fn decompose_chain(&self, chain: &[String]) -> Option<(String, String, ALUOp)> {
         if chain.len() >= 2 {
-            let op1 = "stack_val_1".to_string();
-            let op2 = "stack_val_2".to_string();
+            let op1 = "vsp+0".to_string();
+            let op2 = "vsp+8".to_string();
             let alu_op = self.match_chain(chain)?;
             Some((op1, op2, alu_op))
         } else {
@@ -134,5 +140,15 @@ mod tests {
         let op = reconstructor.match_chain(&chain);
 
         assert_eq!(op, Some(ALUOp::And));
+    }
+
+    #[test]
+    fn test_decompose_chain_uses_vsp_slot_names() {
+        let reconstructor = ALUReconstructor::new();
+
+        let chain = vec!["NOR".to_string(); 4];
+        let result = reconstructor.decompose_chain(&chain);
+
+        assert_eq!(result, Some(("vsp+0".to_string(), "vsp+8".to_string(), ALUOp::Add)));
     }
 }

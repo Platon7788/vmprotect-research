@@ -2,7 +2,7 @@
 //!
 //! Parses VMP bytecode instructions.
 
-use crate::{Handler, PEBinary};
+use crate::{Handler, OpcodeCryptor, PEBinary};
 use anyhow::{Context, Result};
 
 // Handler name constants, shared between operand decoding and size computation.
@@ -39,39 +39,49 @@ impl Bytecode {
         self.data.first().copied().unwrap_or(0)
     }
 
-    /// Decode operands based on handler type
-    pub fn decode_operands(&self, handler: &Handler) -> Result<Vec<u64>> {
+    /// Decode operands based on handler type.
+    ///
+    /// `cryptor` carries the CRC state forward across handlers within a
+    /// single `devirtualize_range` call — VMP's operand cipher is a running
+    /// stream cipher over the whole bytecode section, not reset per
+    /// instruction, so the caller must reuse the same `OpcodeCryptor`
+    /// instance for every instruction it decodes in sequence.
+    pub fn decode_operands(&self, handler: &Handler, cryptor: &mut OpcodeCryptor) -> Result<Vec<u64>> {
         let mut operands = Vec::new();
 
         match handler.name.as_str() {
             H_PUSH_REG => {
                 // 1 byte: register ID
-                operands.push(self.data.get(1).copied().unwrap_or(0) as u64);
+                operands.push(self.read_imm(1, 1, cryptor)?);
             }
             H_PUSH_VALUE => {
                 // Variable: 1/2/4/8 bytes immediate
                 if let Some(size) = handler.size_bytes {
                     if size > 1 {
                         let imm_size = size - 1;
-                        let imm = self.read_imm(1, imm_size)?;
+                        let imm = self.read_imm(1, imm_size, cryptor)?;
                         operands.push(imm);
                     }
                 }
             }
             H_POP_MEMORY => {
                 // Memory offset encoding
-                operands.push(self.data.get(1).copied().unwrap_or(0) as u64);
+                operands.push(self.read_imm(1, 1, cryptor)?);
             }
             H_ADD_REG | H_SUB_REG | H_XOR_REG | H_OR_REG | H_AND_REG => {
                 // Stack-based, no operand bytes
             }
             H_NOR_CHAIN | H_NAND_CHAIN => {
-                // Chain data (encrypted)
+                // Chain data: no operand bytes are read here today (the
+                // handler carries no immediate beyond its opcode slot in
+                // this decoder), so there is nothing to route through the
+                // cryptor yet. See AUDIT_REPORT.md Q4 — extending this to
+                // consume/decrypt trailing chain bytes is separate scope.
                 operands.push(self.vip);
             }
             H_JMP => {
                 // Jump target
-                let offset = self.read_imm(1, 4)?;
+                let offset = self.read_imm(1, 4, cryptor)?;
                 operands.push((self.vip as i64 + offset as i64) as u64);
             }
             H_RET => {
@@ -85,8 +95,15 @@ impl Bytecode {
         Ok(operands)
     }
 
-    /// Read immediate value from bytecode
-    fn read_imm(&self, offset: usize, size: usize) -> Result<u64> {
+    /// Read an immediate value from bytecode, decrypting each byte through
+    /// `cryptor` before assembling it (little-endian).
+    ///
+    /// This is the single choke point where raw operand bytes become
+    /// interpreted values, so it is where `OpcodeCryptor` is applied: every
+    /// operand read advances the cryptor's CRC state via `update_crc`,
+    /// matching VMP's stream-cipher-like behavior where each decrypted byte
+    /// feeds the state used to decrypt the next one.
+    fn read_imm(&self, offset: usize, size: usize, cryptor: &mut OpcodeCryptor) -> Result<u64> {
         let bytes = self
             .data
             .get(offset..offset + size)
@@ -94,7 +111,9 @@ impl Bytecode {
 
         let mut value: u64 = 0;
         for (i, &b) in bytes.iter().enumerate() {
-            value |= (b as u64) << (i * 8);
+            let decrypted = cryptor.decrypt_operand(b, 1);
+            cryptor.update_crc(decrypted);
+            value |= (decrypted as u64) << (i * 8);
         }
 
         Ok(value)
@@ -234,5 +253,45 @@ mod tests {
         let bytecode = make_bytecode();
         let handler = make_handler("INVALID", None);
         assert!(bytecode.size(&handler).is_err());
+    }
+
+    #[test]
+    fn test_decode_operands_applies_cryptor_decryption() {
+        // Same encrypted bytes, two different cryptor CRC states: the
+        // decoded operand value must differ, proving decode_operands routes
+        // bytes through the cryptor instead of interpreting them raw.
+        let bytecode = Bytecode {
+            data: vec![0x11, 0xAB, 0xCD, 0x00, 0x00],
+            vip: 0x140001000,
+        };
+        let handler = make_handler(H_PUSH_VALUE, Some(5));
+
+        let mut zero_crc = OpcodeCryptor::new();
+        zero_crc.set_crc(0);
+        let with_zero_crc = bytecode.decode_operands(&handler, &mut zero_crc).unwrap();
+
+        let mut nonzero_crc = OpcodeCryptor::new();
+        nonzero_crc.set_crc(0x55);
+        let with_nonzero_crc = bytecode.decode_operands(&handler, &mut nonzero_crc).unwrap();
+
+        assert_ne!(with_zero_crc, with_nonzero_crc);
+    }
+
+    #[test]
+    fn test_decode_operands_advances_cryptor_state() {
+        // The cryptor's CRC must change after decoding an operand so the
+        // next handler in the stream sees a different key, matching VMP's
+        // running-cipher behavior across a bytecode section.
+        let bytecode = Bytecode {
+            data: vec![0x11, 0xAB, 0x00, 0x00, 0x00],
+            vip: 0x140001000,
+        };
+        let handler = make_handler(H_PUSH_REG, None);
+
+        let mut cryptor = OpcodeCryptor::new();
+        let crc_before = cryptor.get_crc();
+        bytecode.decode_operands(&handler, &mut cryptor).unwrap();
+
+        assert_ne!(cryptor.get_crc(), crc_before);
     }
 }
