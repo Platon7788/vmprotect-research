@@ -10,17 +10,26 @@
 //! deliberately not copied from the GPL-licensed vmpattack / NoVmp
 //! reference implementations mentioned in `AUDIT_REPORT.md`.
 //!
-//! Design notes:
+//! P0-blocked pairs a stateless matcher CAN'T fully distinguish
+//! (see `AUDIT_REPORT.md` Q2 + `RESEARCH_GAPS.md` §3.1):
 //!
-//! - `RET` and `VJMP` are the same shape at the byte level (both pop a
-//!   value from the VM stack and jump to the dispatcher). We can't tell
-//!   them apart without knowing whether the value came from a prior
-//!   PUSH_IMM (VJMP) or a prior CALL-style handler (RET). This matcher
-//!   labels the pattern `Vjmp` and does not attempt to produce `Ret`.
-//! - `Push` (both the imm and reg flavours) is reported as
-//!   [`VmpSemantic::Push`]; distinguishing imm-source from reg-source
-//!   requires tracking which of VSP/VIP a load came from, which is
-//!   beyond a stateless pattern matcher.
+//! - `Ret` vs `Vjmp`: byte-identical; the label depends on whether
+//!   the popped value came from a prior `PUSH_IMM` (Vjmp) or a
+//!   `CALL`-style handler (Ret) -- cross-handler VM state we don't
+//!   see. classify() emits `Vjmp`; the `Ret` enum variant is left
+//!   in place so a later data-flow pass can promote it.
+//! - `Popreg` vs `Pop`: also byte-identical. We only promote to
+//!   `Popreg` on the tight `MOV [CTX+disp8], reg`-with-`disp8` in
+//!   `[0, 0x80)` shape (small CTX-slot index for a GPR); all other
+//!   Pop-shaped bodies fall through to `Pop`.
+//! - `Ldd` vs `Str`: byte-identical without tracking whether the
+//!   final indirect store lands on `[VSP]` (Ldd) or `[addr]` (Str);
+//!   ordered Ldd-first with Str as a future-extension slot.
+//!
+//! classify() ordering runs most-distinctive fingerprints first
+//! (single-instruction opcodes, then multi-op logic pairs, then
+//! Add before the Push family) and puts the two catch-all shapes
+//! (`Popf`, `Vsetvsp`) last so a stronger fingerprint always wins.
 
 use crate::Bitness;
 
@@ -40,6 +49,11 @@ pub enum VmpSemantic {
     Push,
     Pushstk,
     Pushreg,
+    /// Push of an immediate operand read from the VIP stream. Split
+    /// from the generic `Push` shape so downstream lifting can tell
+    /// "constant literal in bytecode" apart from "value from a CTX
+    /// register slot" (`Pushreg`). See module doc for the ordering.
+    PushImm,
     Popreg,
 
     // Load/Store (VM-context / memory).
@@ -98,63 +112,66 @@ pub enum VmpSemantic {
 pub struct SemanticMatcher;
 
 impl SemanticMatcher {
-    /// Classify a handler body. Returns `None` when no fingerprint
-    /// matches (which the caller may prefer over `Some(Unknown)`
-    /// depending on how it wants to fall through to the x86-level
-    /// classification).
+    /// Classify a handler body. `None` = no fingerprint matched.
     ///
-    /// Ordering is significant: more-distinctive fingerprints run first
-    /// so weaker generic-shape matchers (Push/Pop) don't mask them.
+    /// Ordering (see module doc for rationale): single-instruction
+    /// opcodes -> Vmexit -> Nand/Nor -> Add (before Push family,
+    /// which shares load-indirect + store-indirect) -> Ldd/Str
+    /// (two-load shapes) -> Pushreg/PushImm/Push fallback ->
+    /// Popreg/Pop fallback -> Vjmp -> Popf -> Vsetvsp catch-all.
     pub fn classify(bytecode: &[u8], bitness: Bitness) -> Option<VmpSemantic> {
+        let _ = bitness;
         if bytecode.is_empty() {
             return None;
         }
-
-        // Single-instruction distinctive fingerprints -- cheapest to
-        // check and most reliable when present.
         if contains_pair(bytecode, 0x0F, 0x31) {
             return Some(VmpSemantic::Rdtsc);
         }
         if contains_pair(bytecode, 0x0F, 0xA2) {
             return Some(VmpSemantic::Cpuid);
         }
-
-        // VMEXIT restores real registers and RETs to real x86. Presence
-        // of a real x86 RET (0xC3) is only load-bearing here; all
-        // in-VM control-flow handlers instead tail-JMP the dispatcher.
         if is_vmexit(bytecode) {
             return Some(VmpSemantic::Vmexit);
         }
-
-        // De Morgan pairs: at least two NOTs plus the core logic op.
         if is_nand_shape(bytecode) {
             return Some(VmpSemantic::Nand);
         }
         if is_nor_shape(bytecode) {
             return Some(VmpSemantic::Nor);
         }
-
-        // Push handlers reserve stack (SUB VSP, imm) then store to
-        // [VSP] via a mod=00 MOV. Checked before Pop because SUB with
-        // a small imm in this shape is very rare outside Push.
+        if is_add_shape(bytecode) {
+            return Some(VmpSemantic::Add);
+        }
+        if is_ldd_shape(bytecode) {
+            return Some(VmpSemantic::Ldd);
+        }
+        if is_str_shape(bytecode) {
+            return Some(VmpSemantic::Str);
+        }
+        if is_pushreg_shape(bytecode) {
+            return Some(VmpSemantic::Pushreg);
+        }
+        if is_pushimm_shape(bytecode) {
+            return Some(VmpSemantic::PushImm);
+        }
         if is_push_shape(bytecode) {
             return Some(VmpSemantic::Push);
         }
-
-        // Pop handlers release stack (ADD VSP, imm) and store the
-        // fetched value into the VM context at [CTX+disp] (mod=01/10).
+        if is_popreg_shape(bytecode) {
+            return Some(VmpSemantic::Popreg);
+        }
         if is_pop_shape(bytecode) {
             return Some(VmpSemantic::Pop);
         }
-
-        // VJMP: load from VM stack, adjust VSP, indirect-JMP -- no
-        // context store. Placed after Pop so a Pop with a trailing
-        // dispatcher JMP doesn't get relabelled.
-        let _ = bitness;
         if is_vjmp_shape(bytecode) {
             return Some(VmpSemantic::Vjmp);
         }
-
+        if is_popf_shape(bytecode) {
+            return Some(VmpSemantic::Popf);
+        }
+        if is_vsetvsp_shape(bytecode) {
+            return Some(VmpSemantic::Vsetvsp);
+        }
         None
     }
 }
@@ -308,6 +325,43 @@ fn has_or_reg_reg(bytecode: &[u8]) -> bool {
     has_reg_reg_op(bytecode, &[0x09, 0x0B])
 }
 
+/// `ADD r,r`: opcodes 0x01 (r/m,r) and 0x03 (r,r/m), both mod=11.
+/// Distinct from `has_add_reg_imm8` (the VSP `ADD reg,imm8` bump).
+fn has_add_reg_reg(bytecode: &[u8]) -> bool {
+    has_reg_reg_op(bytecode, &[0x01, 0x03])
+}
+
+/// `MOV r, [r+disp]` (opcode 0x8B, mod=01/10) -- the CTX-slot load
+/// shape that distinguishes `Pushreg` from `PushImm`.
+fn has_load_disp(bytecode: &[u8]) -> bool {
+    (0..bytecode.len()).any(|i| is_disp_at(bytecode, skip_rex(bytecode, i), 0x8B))
+}
+
+fn has_pushfq(bytecode: &[u8]) -> bool {
+    bytecode.contains(&0x9C)
+}
+
+fn has_popfq(bytecode: &[u8]) -> bool {
+    bytecode.contains(&0x9D)
+}
+
+/// Count `MOV r, [r]` (opcode 0x8B, mod=00). Manual advance loop for
+/// the same REX-double-count reason as `count_not_ops`.
+fn count_load_indirect(bytecode: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < bytecode.len() {
+        let p = skip_rex(bytecode, i);
+        if is_indirect_at(bytecode, p, 0x8B) {
+            count += 1;
+            i = p + 2;
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
 // ---------------------------------------------------------------------
 // Composed patterns.
 // ---------------------------------------------------------------------
@@ -349,6 +403,90 @@ fn is_vjmp_shape(bytecode: &[u8]) -> bool {
         && has_indirect_jmp(bytecode)
         && !has_store_disp(bytecode)
         && !has_store_indirect(bytecode)
+}
+
+/// Add: load-indirect + `add r,r` + PUSHFQ + store-indirect. Runs
+/// before the Push family (strict superset of load+store shape).
+fn is_add_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode) && has_add_reg_reg(bytecode) && has_pushfq(bytecode) && has_store_indirect(bytecode)
+}
+
+/// Ldd: two indirect loads, indirect store, imm8 VSP tweak.
+/// Byte-identical to `Str`; classify() runs Ldd first.
+fn is_ldd_shape(bytecode: &[u8]) -> bool {
+    count_load_indirect(bytecode) >= 2 && has_store_indirect(bytecode) && has_add_reg_imm8(bytecode)
+}
+
+/// Str: Ldd's shape plus `!has_store_disp`. Retained as a future
+/// register-tracking hook -- Ldd wins in classify() today.
+fn is_str_shape(bytecode: &[u8]) -> bool {
+    count_load_indirect(bytecode) >= 2
+        && has_store_indirect(bytecode)
+        && has_add_reg_imm8(bytecode)
+        && !has_store_disp(bytecode)
+}
+
+/// PushReg: load-disp (CTX slot) + SUB VSP + store-indirect.
+fn is_pushreg_shape(bytecode: &[u8]) -> bool {
+    has_load_disp(bytecode) && has_sub_reg_imm8(bytecode) && has_store_indirect(bytecode)
+}
+
+/// PushImm: load-indirect (VIP stream) + SUB VSP + store-indirect,
+/// with `!has_load_disp` so a CTX-load body picks `Pushreg` instead.
+fn is_pushimm_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode)
+        && has_sub_reg_imm8(bytecode)
+        && has_store_indirect(bytecode)
+        && !has_load_disp(bytecode)
+}
+
+/// Popreg: Pop-shape with exactly one `MOV [r+disp8], r` where
+/// `disp8 < 0x80` (small CTX-slot index for a GPR). Else falls
+/// through to `Pop`.
+fn is_popreg_shape(bytecode: &[u8]) -> bool {
+    if !is_pop_shape(bytecode) {
+        return false;
+    }
+    let mut store_count = 0usize;
+    let mut first_disp8: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytecode.len() {
+        let p = skip_rex(bytecode, i);
+        if bytecode.get(p).copied() == Some(0x89) {
+            if let Some(modrm) = bytecode.get(p + 1).copied() {
+                let mode = modrm & 0xC0;
+                if mode == 0x40 || mode == 0x80 {
+                    let rm = modrm & 0x07;
+                    let disp_start = if rm == 4 { p + 3 } else { p + 2 };
+                    if store_count == 0 && mode == 0x40 {
+                        first_disp8 = bytecode.get(disp_start).copied();
+                    }
+                    store_count += 1;
+                    i = if mode == 0x40 { disp_start + 1 } else { disp_start + 4 };
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    store_count == 1 && matches!(first_disp8, Some(d) if d < 0x80)
+}
+
+/// Vsetvsp: load-indirect only, no adjust, no stores, no jump.
+/// Strictest "matched nothing else" catch-all; runs last.
+fn is_vsetvsp_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode)
+        && !has_add_reg_imm8(bytecode)
+        && !has_sub_reg_imm8(bytecode)
+        && !has_store_indirect(bytecode)
+        && !has_store_disp(bytecode)
+        && !has_indirect_jmp(bytecode)
+}
+
+/// Popf: bare POPFQ (0x9D). Vmexit runs first; anything reaching
+/// here with 0x9D is a real POPF outside a vmexit frame.
+fn is_popf_shape(bytecode: &[u8]) -> bool {
+    has_popfq(bytecode)
 }
 
 #[cfg(test)]
