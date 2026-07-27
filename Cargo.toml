@@ -36,6 +36,12 @@ default = []
 # default so `cargo test` never depends on binaries the user has not
 # provided — see `tests/fixtures/README.md`.
 real-samples = []
+# Gates the synthetic-sample builder (`src/synthetic_sample.rs`) and its
+# end-to-end validation harness (`tests/synthetic.rs`). Off by default so
+# the generator, which is only useful for validating our own detection
+# stack, does not add compile time to plain `cargo test` runs. See
+# `src/synthetic_sample.rs` for what the generated PEs look like.
+synthetic-samples = []
 
 [profile.release]
 opt-level = 3

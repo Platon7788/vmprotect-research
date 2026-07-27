@@ -110,7 +110,13 @@ use ext::{
 /// `None` on the classification means "no VMP-level pattern matched";
 /// the x86-instruction-level `handler_type` string remains the fallback
 /// for consumers that don't yet consume this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// `PartialOrd`/`Ord` is derived on the discriminant order below —
+/// stable and deterministic (adding a variant appends at the end and
+/// does not renumber existing ones). Downstream code that wants
+/// alphabetical order should sort by the `Debug` / `serde` name
+/// instead of relying on the discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(missing_docs)]
 pub enum VmpSemantic {
     // Data movement (VM-stack).

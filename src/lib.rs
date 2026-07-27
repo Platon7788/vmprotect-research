@@ -32,6 +32,8 @@ pub mod protector;
 mod protector_matchers;
 mod protector_signals;
 pub mod register_roles;
+#[cfg(feature = "synthetic-samples")]
+pub mod synthetic_sample;
 pub mod version;
 mod version_matchers;
 pub mod xor_key_analyzer;

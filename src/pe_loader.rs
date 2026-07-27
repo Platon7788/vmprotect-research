@@ -275,7 +275,16 @@ pub(crate) fn sanitise_section_name(name: &str) -> String {
 /// variant Commit F needed) so it lives in a `#[path]`-included sibling
 /// to keep `pe_loader.rs` under the crate's 500-line ceiling. See
 /// `pe_loader_test_util.rs` for the actual builder functions.
-#[cfg(test)]
+///
+/// Compiled under `#[cfg(test)]` (lib-side tests) OR
+/// `#[cfg(feature = "synthetic-samples")]` — the Commit-S synthetic
+/// sample builder reuses these primitives to lay out on-disk PEs, and
+/// duplicating the ~200-line multi-section generator would violate the
+/// project's 500-line-per-file convention. The `not(test)` allow
+/// silences dead-code warnings for the fixture variants only lib-side
+/// tests use once the feature is enabled without `cfg(test)`.
+#[cfg(any(test, feature = "synthetic-samples"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[path = "pe_loader_test_util.rs"]
 pub(crate) mod test_util;
 

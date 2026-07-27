@@ -81,6 +81,11 @@ struct Args {
     /// Export the unified analysis report (protector family + VMP
     /// version + dispatch table + register roles + all handler
     /// classifications) to a single pretty-printed JSON file.
+    ///
+    /// Distinct from `--export-opcodes` / `--export-handlers`: those
+    /// dump full tables intended for follow-on tooling; this one is a
+    /// compact aggregate for validation harnesses — the
+    /// `tests/synthetic.rs` end-to-end harness reads exactly this file.
     #[arg(long, value_name = "FILE")]
     export_analysis: Option<PathBuf>,
 
@@ -228,14 +233,16 @@ fn main() -> anyhow::Result<ExitCode> {
     }
 
     // Export the unified analysis report if requested. Runs after the
-    // whole detection/extraction pipeline above (family/version/
-    // dispatch/handlers/roles are already populated on `devirt` by
-    // this point), so the report reflects the complete run rather than
-    // a partial snapshot.
-    if let Some(export_path) = args.export_analysis {
+    // whole detection/extraction pipeline (family/version/dispatch/
+    // handlers/roles are already populated on `devirt`), so the report
+    // reflects the complete run. Emitted BEFORE F2 gate below so even a
+    // rejected binary still writes the JSON — downstream harnesses
+    // (tests/synthetic.rs, tests/samples.rs) rely on this being written
+    // independently of the tool's exit code.
+    if let Some(export_path) = args.export_analysis.as_ref() {
         let report = devirt.analysis_report().context("build unified analysis report")?;
         let json = serde_json::to_string_pretty(&report).context("serialize analysis report")?;
-        std::fs::write(&export_path, json).context("write analysis report file")?;
+        std::fs::write(export_path, json).context("write analysis report file")?;
         info!("Analysis report exported to: {}", export_path.display());
     }
 
