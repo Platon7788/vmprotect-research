@@ -108,16 +108,24 @@ struct Args {
 fn main() -> anyhow::Result<ExitCode> {
     let args = Args::parse();
 
-    // Initialize logging
-    if args.verbose {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Debug)
-            .init();
+    // Initialize logging.
+    //
+    // `-v` used to raise the GLOBAL filter to Debug, which turned every
+    // upstream crate's debug traffic on too. In particular, `goblin`
+    // logs the entire `Debug`-formatted PE Header + DosStub + every
+    // section's byte buffer at DEBUG — a real DLL produced a 155 MB
+    // log file, making `-v` unusable for triage. Scope the Debug
+    // filter to our own crate; everything else stays at Info floor.
+    let base_level = log::LevelFilter::Info;
+    let our_level = if args.verbose {
+        log::LevelFilter::Debug
     } else {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Info)
-            .init();
-    }
+        log::LevelFilter::Info
+    };
+    env_logger::Builder::from_default_env()
+        .filter_level(base_level)
+        .filter_module("vmp_devirt", our_level)
+        .init();
 
     info!("VMP Devirtualizer v0.1.0");
     info!("Loading binary: {}", args.binary.display());
