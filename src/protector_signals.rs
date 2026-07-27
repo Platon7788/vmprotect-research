@@ -135,7 +135,14 @@ pub(crate) fn scan_rx_sections_for_dispatcher(binary: &PEBinary) -> Result<bool>
                 && has_add_reg_mem(window)
                 && has_indirect_jmp_ff4(window)
             {
-                log::debug!("structural VMP dispatcher fingerprint found in section `{name}` at offset 0x{offset:x}");
+                // Sanitise the attacker-influenced section name before
+                // it hits the log line — a crafted PE can name a section
+                // `.vmp0\x1B[31m` and inject ANSI escapes / CR-LF into
+                // the analyst's terminal under `--verbose`. Commit J's
+                // sanitiser sweep predated this call site (added by I);
+                // covered here in the T fix.
+                let safe_name = crate::pe_loader::sanitise_section_name(&name);
+                log::debug!("structural VMP dispatcher fingerprint found in section `{safe_name}` at offset 0x{offset:x}");
                 return Ok(true);
             }
         }

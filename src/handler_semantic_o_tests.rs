@@ -60,7 +60,9 @@ fn vemit_shape_detected_x64() {
 fn vemit_rejected_when_xor_decrypt_present() {
     // Same shape as `vemit_shape_detected_x64` but with an XOR
     // reg,imm8 decrypt inserted: Vemit's `!has_xor_reg_imm` gate
-    // rejects it, and no other matcher fits this residual shape.
+    // rejects it, and no other matcher fits this residual shape
+    // (Vsetvsp is documented unreachable on any body carrying a
+    // dispatcher tail JMP, see the `is_vsetvsp_shape` doc comment).
     let body = [
         0x49, 0x8B, 0x06, // MOV rax, [r14]
         0x83, 0xF0, 0x05, // XOR eax, 5
@@ -141,4 +143,68 @@ fn short_popfq_near_tail_without_ret_is_popf() {
     // rejected-deep-0x9D counterpart in `handler_semantic_tests.rs`).
     let body = [0x90, 0x90, 0x90, 0x9D, 0x90];
     assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Popf));
+}
+
+// -----------------------------------------------------------------
+// Commit T regressions
+// -----------------------------------------------------------------
+
+/// Commit T: `has_xor_reg_imm` broadening from imm8-only to imm32 +
+/// reg-reg. A Vjmp-shape body containing `xor rbx, imm32` (0x81 /6)
+/// now correctly disqualifies from Ret and falls through to Vjmp.
+///
+/// Pre-T, only 0x83 /6 (imm8) was recognised. VMP 3.x's rolling-key
+/// stream cipher emits `xor rXX, imm32` whenever the key exceeds
+/// imm8 range, which is often — so pre-T handlers with a legitimate
+/// crypto XOR were misclassified as Ret.
+#[test]
+fn t_xor_imm32_form_disqualifies_ret_and_lands_on_vjmp() {
+    let body = [
+        0x49, 0x8B, 0x06, // MOV rax, [r14]
+        0x49, 0x83, 0xC6, 0x08, // ADD r14, 8
+        0x48, 0x81, 0xF3, 0xDE, 0xAD, 0xBE, 0xEF, // XOR rbx, 0xEFBEADDE (imm32)
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, // JMP [rip+0]
+    ];
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vjmp));
+}
+
+/// Commit T: `has_xor_reg_imm` broadening for the reg-reg XOR form.
+/// r0da / vxcall document `xor al, bl`-shape ops as the running-key
+/// folding step VMP 2.x/3.x actually emits in most handlers. A
+/// Vjmp-shape body containing `xor al, bl` (0x30 /r, mod=11) now
+/// disqualifies from Ret.
+#[test]
+fn t_xor_reg_reg_form_disqualifies_ret_and_lands_on_vjmp() {
+    let body = [
+        0x49, 0x8B, 0x06, // MOV rax, [r14]
+        0x49, 0x83, 0xC6, 0x08, // ADD r14, 8
+        0x30, 0xD8, // XOR al, bl (0x30 /r mod=11)
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vjmp));
+}
+
+/// Commit T: `confidence_for(Ret)` correctly ranks above Vjmp now.
+/// Pre-T inverted the "stricter matcher wins higher confidence"
+/// contract: Ret was 50, Vjmp was 85, even though Ret is a strict
+/// subset (body < 30 AND no XOR AND Vjmp-shape).
+#[test]
+fn t_ret_confidence_is_higher_than_vjmp() {
+    assert!(confidence_for(VmpSemantic::Ret) > confidence_for(VmpSemantic::Vjmp));
+    assert!(confidence_for(VmpSemantic::Vemit) > confidence_for(VmpSemantic::Vjmp));
+}
+
+/// Commit T: Vsetvsp is documented unreachable on any body carrying a
+/// dispatcher tail JMP (see the shape's doc comment). Vemit's simpler
+/// `load-indirect + indirect_jmp + !has_xor + !has_add_reg_mem` shape
+/// always wins first. This test pins the current behaviour so the
+/// audit note stays visible: a short "just a load + tail JMP" body
+/// classifies as Vemit, not Vsetvsp.
+#[test]
+fn t_short_body_with_dispatcher_tail_is_vemit_not_vsetvsp() {
+    let body = [
+        0x48, 0x8B, 0x03, // MOV rax, [rbx]
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vemit));
 }

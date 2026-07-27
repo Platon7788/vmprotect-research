@@ -191,14 +191,44 @@ pub(super) fn count_load_indirect(bytecode: &[u8]) -> usize {
     count
 }
 
-/// `XOR reg, imm8` (opcode 0x83 /6, mod=11, reg field=6 -> ModR/M in
-/// `0xF0..=0xF7`). Every ordinary VMP jump/pop/push handler decrypts
-/// its VIP-stream operand with an XOR-imm before using it; `Vemit`'s
-/// raw literal-jump escape and the very short `Ret` handlers are the
-/// two shapes that skip this step, so its absence is the distinguishing
-/// signal for both (Commit O).
+/// `XOR reg, imm` in any of the ordinary VMP-cryptor forms.
+///
+/// Covers, in order of frequency in real handlers per the public VMP
+/// write-ups (back.engineering, r0da, vxcall):
+/// - `0x83 /6` (mod=11): XOR reg, imm8 — the shortest form, 3 bytes.
+/// - `0x81 /6` (mod=11): XOR reg, imm32 — 6 bytes, produced when the
+///   key doesn't fit in imm8.
+/// - `0x31 /r` (mod=11): XOR r/m32, reg32 — reg-reg form; VMP 2.x and
+///   3.x both use `xor al, bl`-shape ops to fold the running key into
+///   the decrypted byte (r0da §3, vxcall §rolling-key).
+/// - `0x33 /r` (mod=11): XOR r32, r/m32 — reg-reg other operand order.
+/// - `0x30 /r` / `0x32 /r` (mod=11): 8-bit reg-reg forms (`xor al, bl`
+///   verbatim from r0da's disassembly).
+///
+/// The narrow imm8-only version of this primitive (Commit O) missed
+/// the reg-reg forms that the synthetic `vjmp_key` handler and every
+/// real VMP-3 handler actually emit, causing Ret to shadow Vjmp on
+/// live samples. Broadened here in the T fix.
 pub(super) fn has_xor_reg_imm(bytecode: &[u8]) -> bool {
-    has_group1_imm8(bytecode, 0xF0, 0xF7)
+    // 0x83 /6 imm8, mod=11 (ModR/M in 0xF0..=0xF7).
+    if has_group1_imm8(bytecode, 0xF0, 0xF7) {
+        return true;
+    }
+    // 0x81 /6 imm32, mod=11 (ModR/M in 0xF0..=0xF7). Same reg-encoding
+    // as the imm8 form, differs only in the opcode byte and the fact
+    // that we don't need to walk the 4-byte immediate to detect it.
+    let imm32_hit = (0..bytecode.len()).any(|i| {
+        let p = skip_rex(bytecode, i);
+        bytecode.get(p).copied() == Some(0x81)
+            && matches!(bytecode.get(p + 1).copied(), Some(b) if (0xF0..=0xF7).contains(&b))
+    });
+    if imm32_hit {
+        return true;
+    }
+    // Reg-reg XOR — 0x30 (r/m8, r8), 0x31 (r/m32, r32), 0x32 (r8, r/m8),
+    // 0x33 (r32, r/m32). All four require mod=11 to count as reg-reg.
+    // `has_reg_reg_op` already enforces the mod=11 gate.
+    has_reg_reg_op(bytecode, &[0x30, 0x31, 0x32, 0x33])
 }
 
 /// `ADD r, [r]` / `ADD r, [r+disp]` (opcode 0x03, `mod != 11`) -- the

@@ -103,11 +103,16 @@ pub(super) fn per_handler_dominant_reg(
 /// `winner`. Also returns every disagreeing register seen, so the
 /// caller can surface the top runner-ups in the warning log line.
 ///
-/// Denominator is `handlers.len()` — handlers with no dominant
-/// register for this role count against the ratio. Rationale: silent
-/// no-signal handlers are indistinguishable from a legitimately
-/// disagreeing one downstream, so treating them as agreement would
-/// optimistically hide genuine drift.
+/// Denominator is the count of handlers that produced a dominant
+/// register FOR THIS ROLE — silent no-signal handlers (which the T
+/// audit flagged) are excluded from BOTH sides of the ratio. Rationale:
+/// a role like VKEY only fires on handlers with an XOR-imm pattern
+/// (~15-25% of typical handlers), and lumping every store-only or
+/// arithmetic-only handler into the "disagreement" bucket sinks the
+/// ratio well below 60% even when every VOTING handler agrees on the
+/// same register. The pre-T formula was `matches / handlers.len()`
+/// which caused synthetic VKEY (5/30 voting) to score 16.7% and get
+/// dropped.
 pub(super) fn handler_agreement(
     handlers: &[Vec<u8>],
     bitness: Bitness,
@@ -121,15 +126,25 @@ pub(super) fn handler_agreement(
         return (0.0, Vec::new());
     }
     let mut matches = 0usize;
+    let mut voting = 0usize;
     let mut runners = Vec::new();
     for body in handlers {
         match per_handler_dominant_reg(body, bitness, score) {
-            Some(reg) if reg == winner => matches += 1,
-            Some(reg) => runners.push(reg),
+            Some(reg) if reg == winner => {
+                matches += 1;
+                voting += 1;
+            }
+            Some(reg) => {
+                runners.push(reg);
+                voting += 1;
+            }
             None => {}
         }
     }
-    (matches as f64 / handlers.len() as f64, runners)
+    if voting == 0 {
+        return (0.0, runners);
+    }
+    (matches as f64 / voting as f64, runners)
 }
 
 /// Enforce [`CONSISTENCY_THRESHOLD`] on the aggregate winner. When

@@ -221,9 +221,12 @@ pub enum VmpSemantic {
 /// negative guards, but conceptually "nothing more specific matched")
 /// is deliberately the lowest score per Commit R's spec.
 ///
-/// Variants never returned by `classify()` today (`Str`, `Ret`,
-/// `Vemit`, `Vexec`, `Vunk`, `Unknown`) still get a defensible score so
-/// the function stays exhaustive against future matcher additions.
+/// Ret/Vemit/Popstk ARE emitted by `classify()` since Commit O — their
+/// confidence tier below is set accordingly. `Str`/`Vexec`/`Vunk`/
+/// `Unknown` remain never-emitted by the current ordering (Ldd shadows
+/// Str; Vexec is folded into Vemit; the last two are enum-only
+/// sentinels) and get a defensible score so the function stays
+/// exhaustive against future matcher additions.
 pub fn confidence_for(semantic: VmpSemantic) -> u8 {
     match semantic {
         // Single distinctive opcode fingerprint, no load/store shape
@@ -293,10 +296,25 @@ pub fn confidence_for(semantic: VmpSemantic) -> u8 {
         // Vsetvsp: the catch-all explicitly called out in the spec.
         VmpSemantic::Vsetvsp => 40,
 
-        // Not produced by classify() today -- defensive defaults for
-        // future matcher additions.
-        VmpSemantic::Ret | VmpSemantic::Vemit | VmpSemantic::Vexec => 50,
-        VmpSemantic::Popstk | VmpSemantic::Pushstk => 50,
+        // Ret: strict subset of Vjmp (body length < 30 AND no XOR-imm
+        // decrypt AND Vjmp-shape), so genuine Ret hits are more
+        // specific and MUST outscore the Vjmp fallback (85). Tier
+        // corrected in Commit T after the pre-T audit found the two
+        // inverted -- Ret sitting at 50 while Vjmp was 85 broke the
+        // "stricter matcher -> higher confidence" contract.
+        VmpSemantic::Ret => 90,
+        // Vemit: same rank as Ret -- also a strict subset of Vjmp
+        // (load-indirect + indirect-jmp with no XOR + no table-add),
+        // and equally specific in what it excludes.
+        VmpSemantic::Vemit => 88,
+        // Popstk / Pushstk: three-primitive shapes plus a negative
+        // guard on CTX-touch. Slightly tighter than Push/Pop
+        // fallbacks (which don't check the CTX-touch guard), so they
+        // sit just above the base Pushreg/Push/Pop tier (70).
+        VmpSemantic::Popstk | VmpSemantic::Pushstk => 75,
+        // Never emitted by the current classify() -- folded into
+        // Vemit / Ldd / sentinel-only.
+        VmpSemantic::Vexec => 50,
         VmpSemantic::Vunk | VmpSemantic::Unknown => 30,
     }
 }
@@ -549,12 +567,22 @@ fn is_popreg_shape(bytecode: &[u8]) -> bool {
 
 /// Vsetvsp: exactly one load-indirect, no adjust, no stores, no jump,
 /// AND a short body (< 12 bytes). Strictest "matched nothing else"
-/// catch-all; runs last. Commit O adds the length + single-load gate
-/// -- the shape is intrinsically similar to `Vnop`'s (both are "just a
-/// VSP touch and nothing else"), so `Vnop` must keep running first or
-/// `Vsetvsp` would never lose to it; the extra gate here only trims
-/// false positives from a longer body that happens to carry a lone
-/// stray load-indirect nowhere near the real handler-body pattern.
+/// catch-all; runs last.
+///
+/// Documented unreachable on live VMP handlers (per Commit T audit): a
+/// real Vsetvsp handler does `mov VSP, [VSP]` (store IS the load base
+/// via register-identity), then the dispatcher tail JMP. Both the tail
+/// JMP and the store existed on-disk. Neither our load/store byte-
+/// primitives nor the `!has_indirect_jmp` guard can tell that the
+/// store target is the same register as the load base — that requires
+/// register-identity tracking (Commit K's register_roles voter runs
+/// only aggregate-across-handlers, not intra-handler). Any real body
+/// with the tail JMP satisfies Vemit's simpler `load-indirect +
+/// indirect_jmp + !has_xor_reg_imm + !has_add_reg_mem` shape and wins
+/// via ordering. Vsetvsp therefore only fires on synthetic unit-test
+/// bodies (no tail JMP) and is retained as a documented sentinel; the
+/// audit note flags this as an intrinsic limit of the stateless
+/// classifier rather than a bug.
 fn is_vsetvsp_shape(bytecode: &[u8]) -> bool {
     bytecode.len() < 12
         && count_load_indirect(bytecode) == 1
