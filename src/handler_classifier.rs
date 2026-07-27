@@ -273,9 +273,33 @@ impl HandlerClassifier {
 
     /// Classify all handlers in a list
     pub fn classify_all(binary: &PEBinary, handlers: &[u64]) -> Result<Vec<HandlerClassification>> {
-        let mut classifications = Vec::new();
+        Self::classify_all_and_bodies(binary, handlers).map(|(classifications, _)| classifications)
+    }
+
+    /// Classify every handler AND return the raw body bytes read for
+    /// each. The bodies are the same up-to-100-byte prefixes
+    /// `classify` sees (pre-junk-strip), so downstream analyses like
+    /// the register-role voter don't have to redo the section reads.
+    ///
+    /// A handler whose bytes couldn't be read yields an empty body in
+    /// the returned vector at the same index as its
+    /// `HandlerClassification`, so the two slices stay aligned by
+    /// index without callers having to filter.
+    pub fn classify_all_and_bodies(
+        binary: &PEBinary,
+        handlers: &[u64],
+    ) -> Result<(Vec<HandlerClassification>, Vec<Vec<u8>>)> {
+        let mut classifications = Vec::with_capacity(handlers.len());
+        let mut bodies = Vec::with_capacity(handlers.len());
 
         for &handler_va in handlers {
+            let body = if handler_va == 0 {
+                Vec::new()
+            } else {
+                binary.read_bytes_up_to(handler_va, 100).unwrap_or_default()
+            };
+            bodies.push(body);
+
             match Self::classify(binary, handler_va) {
                 Ok(classification) => classifications.push(classification),
                 Err(_) => {
@@ -290,7 +314,7 @@ impl HandlerClassifier {
             }
         }
 
-        Ok(classifications)
+        Ok((classifications, bodies))
     }
 
     /// Get handler statistics

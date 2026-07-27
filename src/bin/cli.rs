@@ -194,6 +194,19 @@ fn main() -> anyhow::Result<ExitCode> {
         for (i, (handler_type, count)) in sorted_stats.iter().take(10).enumerate() {
             info!("  {}. {} ({})", i + 1, handler_type, count);
         }
+
+        // Register-role vote (VIP / VSP / VKEY canonicalisation).
+        // Per-role top-three candidates already went to the log at
+        // info level from `register_roles::analyse_handlers` itself;
+        // this line is the summary the CLI user actually looks for.
+        let roles = devirt.register_roles();
+        info!(
+            "Register roles (from {} handler bodies): vsp={} vip={} vkey={}",
+            roles.handlers_seen,
+            roles.vsp.map(|r| r.as_str()).unwrap_or("?"),
+            roles.vip.map(|r| r.as_str()).unwrap_or("?"),
+            roles.vkey.map(|r| r.as_str()).unwrap_or("?"),
+        );
     } else {
         info!("Could not locate dispatch table");
     }

@@ -31,6 +31,7 @@ pub mod pe_loader;
 pub mod protector;
 mod protector_matchers;
 mod protector_signals;
+pub mod register_roles;
 pub mod version;
 mod version_matchers;
 pub mod xor_key_analyzer;
@@ -51,6 +52,7 @@ pub use handler_semantic::{SemanticMatcher, VmpSemantic};
 pub use opcode_table::{Handler, OpcodeTable};
 pub use pe_loader::{Bitness, PEBinary};
 pub use protector::{ProtectorDetector, ProtectorFamily, ProtectorReport};
+pub use register_roles::{Register, RegisterRoles};
 pub use version::{VersionDetector, VmpVersion};
 pub use xor_key_analyzer::{XorKeyAnalyzer, XorKeyEntry};
 
@@ -62,6 +64,11 @@ pub struct VmpDevirtualizer {
     opcode_table: OpcodeTable,
     dispatch_table_va: Option<u64>,
     handler_classifications: Vec<HandlerClassification>,
+    /// Result of the register-role vote across all extracted handler
+    /// bodies. Populated once during construction; defaults (all
+    /// `None`) when no dispatch table was located or extraction
+    /// failed, so callers can still access it unconditionally.
+    register_roles: RegisterRoles,
     /// Reused across every `devirtualize_range` call so pattern lookups
     /// don't rebuild the NOR/NAND pattern table per call.
     alu_reconstructor: ALUReconstructor,
@@ -87,6 +94,7 @@ impl VmpDevirtualizer {
         let mut opcode_table = OpcodeTable::new();
         let mut dispatch_table_va = None;
         let mut handler_classifications = Vec::new();
+        let mut register_roles = RegisterRoles::default();
 
         // Try to locate and extract dispatch table
         match DispatchTableLocator::locate(&binary, dispatch_rva_hint) {
@@ -105,8 +113,8 @@ impl VmpDevirtualizer {
                                 log::info!("Dispatch table validation passed");
 
                                 // Classify all handlers
-                                match HandlerClassifier::classify_all(&binary, &handlers) {
-                                    Ok(classifications) => {
+                                match HandlerClassifier::classify_all_and_bodies(&binary, &handlers) {
+                                    Ok((classifications, bodies)) => {
                                         log::info!("Classified {} handlers", classifications.len());
 
                                         // Populate opcode table with classifications
@@ -124,6 +132,16 @@ impl VmpDevirtualizer {
                                         }
 
                                         handler_classifications = classifications;
+
+                                        // Vote on register roles from the
+                                        // same handler-body prefixes the
+                                        // classifier already saw — cheaper
+                                        // than a second section-read pass
+                                        // and keeps the byte-window we
+                                        // analyse consistent across layers.
+                                        if let Ok(bitness) = binary.bitness() {
+                                            register_roles = register_roles::analyse_handlers(&bodies, bitness);
+                                        }
                                     }
                                     Err(e) => {
                                         log::warn!("Failed to classify handlers: {}", e);
@@ -164,6 +182,7 @@ impl VmpDevirtualizer {
             opcode_table,
             dispatch_table_va,
             handler_classifications,
+            register_roles,
             alu_reconstructor: ALUReconstructor::new(),
         })
     }
@@ -224,6 +243,16 @@ impl VmpDevirtualizer {
     /// Get handler statistics
     pub fn handler_statistics(&self) -> HashMap<String, usize> {
         HandlerClassifier::get_statistics(&self.handler_classifications)
+    }
+
+    /// Register-role vote result (VIP/VSP/VKEY canonicalisation).
+    ///
+    /// Populated during construction by
+    /// [`register_roles::analyse_handlers`] over the same handler-body
+    /// prefixes fed to the classifier. When no dispatch table was
+    /// located, returns the default (all fields `None`).
+    pub fn register_roles(&self) -> &RegisterRoles {
+        &self.register_roles
     }
 
     /// Export opcode table as JSON
