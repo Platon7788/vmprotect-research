@@ -292,8 +292,8 @@ fn junk_inserted_pop_shape_still_classifies_as_pop_after_strip() {
     let stripped = strip_junk(&body, Bitness::X64);
     assert_eq!(
         SemanticMatcher::classify(&stripped, Bitness::X64),
-        Some(VmpSemantic::Pop),
-        "stripped body must still classify as Pop; stripped bytes: {:02X?}",
+        Some(VmpSemantic::Popreg),
+        "stripped body must still classify as Popreg; stripped bytes: {:02X?}",
         stripped
     );
 }
@@ -310,8 +310,8 @@ fn junk_inserted_pop_shape_still_classifies_before_and_after_strip() {
     let stripped = strip_junk(&body, Bitness::X64);
     let pre = SemanticMatcher::classify(&body, Bitness::X64);
     let post = SemanticMatcher::classify(&stripped, Bitness::X64);
-    assert_eq!(pre, Some(VmpSemantic::Pop));
-    assert_eq!(post, Some(VmpSemantic::Pop));
+    assert_eq!(pre, Some(VmpSemantic::Popreg));
+    assert_eq!(post, Some(VmpSemantic::Popreg));
 }
 
 // -----------------------------------------------------------------
