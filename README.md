@@ -12,9 +12,10 @@ Rust CLI + library for analyzing VMProtect-obfuscated binaries. Loads PE binarie
 - VM version heuristics — scored rule cascade over entry-stub bytes, `.vmp0`/`.vmp1` section layout, and auxiliary markers, returning a version + 0-100 confidence
 - Dispatch-table locator (256-entry pointer table scan + optional `--dispatch-rva` hint)
 - Handler classifier (x86 / x86-64 first-byte + REX-prefix patterns, bitness-gated)
+- VMP-semantic handler matcher (`VmpSemantic`, 8 of ~35 categories recognized) layered on top of the x86-level classifier
 - Optional Unicorn CPU-emulation extraction via Python `unicorn` subprocess
-- ValueCryptor / CRC operand decryption
-- ALU chain (NOR / NAND) → arithmetic op mapping
+- ValueCryptor / CRC operand decryption, wired into bytecode operand decoding
+- ALU chain (NOR / NAND) → arithmetic op mapping, wired into the devirtualization pipeline
 - JSON export for opcode table and handler classifications
 
 ---
@@ -65,10 +66,16 @@ Extraction output is written to `std::env::temp_dir()/vmp_devirt_dispatch_entrie
 ./target/release/vmp_devirt <binary> --export-opcodes opcodes.json
 
 # Devirtualize a range starting at a VIP address (hex, with or without 0x)
+# Defaults to the PE entry point if --vip is omitted.
 ./target/release/vmp_devirt <binary> --vip 0x140001000 --format json
+
+# Override auto-detected version for research (skips the non-VMP exit gate)
+./target/release/vmp_devirt <binary> --force-version vmp35
 ```
 
 Full CLI reference: `vmp_devirt --help`.
+
+**Exit codes:** `0` on success, `1` on generic error, `2` (`EXIT_NOT_VMP`) when the binary does not look VMP-protected (detector returned `Unknown`/low confidence and no dispatch table was found) — pass `--force-version` and/or `--dispatch-rva` to override.
 
 ---
 
@@ -120,15 +127,18 @@ Input Binary (PE / ELF)
 | `src/bytecode.rs` | Bytecode reader / operand decoder |
 | `src/decrypt.rs` | `OpcodeCryptor` (CRC-based operand decryption) |
 | `src/alu.rs` | NOR/NAND chain → ALU op reconstruction |
+| `src/handler_semantic.rs` | VMP-semantic handler classification — `VmpSemantic` enum (~35 categories) + `SemanticMatcher` (8 multi-instruction fingerprints); test module `handler_semantic_tests.rs` is `#[path]`-included from here |
 | `src/bin/cli.rs` | CLI |
 
-~2 800 lines of Rust across 13 files (12 `src/*.rs` modules + `src/bin/cli.rs`).
+~4 800 lines of Rust across 15 files (13 `src/*.rs` modules + `src/handler_semantic_tests.rs` test module + `src/bin/cli.rs`).
 
 ---
 
 ## Test status
 
-`cargo test --lib` — 66 tests, all green (up from 16). `cargo clippy --all-targets` — 0 warnings. CI (`.github/workflows/ci.yml`) now runs build/test/clippy/fmt on a Windows + Linux matrix, plus a separate `cargo audit` + `cargo deny` security-audit job.
+`cargo test --all-targets` — 111 tests, all green (105 lib + 1 bin + 5 integration; up from 66, up from 16 originally). `cargo clippy --all-targets` — 0 warnings. CI (`.github/workflows/ci.yml`) now runs build/test/clippy/fmt on a Windows + Linux matrix, plus a separate `cargo audit` + `cargo deny` security-audit job.
+
+Integration tests (`tests/cli.rs`, via `assert_cmd`) exercise the compiled CLI binary against in-memory-fixture-backed PE files: default `--vip` resolution, the non-VMP exit-code gate, `--force-version` override (including its rejection of unknown values), and short-flag disambiguation as a regression guard.
 
 Real end-to-end validation against VMP-protected sample binaries has **not been re-run since the current audit**. Earlier internal reports (`docs/VALIDATION_REPORT.md`) claim 22/22 samples pass, but they predate the audit. Take those numbers as historical, not current. VMP 1.x / 2.x detection is no longer a stub (see below), but no live x86 VMP-protected binary has been analyzed end-to-end with the current code.
 
@@ -138,7 +148,7 @@ Real end-to-end validation against VMP-protected sample binaries has **not been 
 
 ```bash
 cargo build                        # debug build
-cargo test --lib                   # 66 unit tests
+cargo test --all-targets           # 111 tests (105 lib + 1 bin + 5 integration)
 cargo clippy --all-targets         # 0 warnings (CI enforces -D warnings)
 cargo fmt --check                  # style is enforced project-wide (rustfmt.toml)
 ```
@@ -150,8 +160,8 @@ CI runs all four on every push/PR (`.github/workflows/ci.yml`), on a Windows + L
 ## Known Limitations
 
 1. **VMP 3.7+ (merged handlers) is not supported.** The classifier assumes one opcode → one handler entry, which breaks on 3.7+. See `docs/FUTURE_WORK.md`.
-2. **Handler classifier covers only ~20 x86 first-byte patterns** out of the 256-opcode space; unknown handlers are labeled `UNKNOWN` with low confidence. The taxonomy is also still x86-instruction-level (`MOV_REG_REG`, `ADD_REG_REG`, ...), not VMP-semantic (`PUSH_VALUE`, `NOR_CHAIN`, ...) — mapping x86 patterns to VMP semantics is future work. Tracked as Q2.
-3. **ALU decompose returns dummy stack-slot names** (`"stack_val_1"`, `"stack_val_2"`) rather than real symbolic slots, and isn't wired into the main devirtualization pipeline. Tracked as Q3.
+2. **Handler classifier covers only ~20 x86 first-byte patterns** out of the 256-opcode space; unknown handlers are labeled `UNKNOWN` with low confidence. A parallel VMP-semantic layer now exists alongside it: `HandlerClassification.vmp_semantic: Option<VmpSemantic>` (`src/handler_semantic.rs`), populated by `SemanticMatcher` against ~35 VMP handler categories. Currently **8 of ~35 are recognized** (`Rdtsc`, `Cpuid`, `Vmexit`, `Nand`, `Nor`, `Push`, `Pop`, `Vjmp`); the rest fall back to `None` and the legacy x86-instruction-level `handler_type` label. True-positive rate against real VMP-protected binaries is unverified — no live sample has been run through the matcher yet. Tracked as Q2.
+3. **ALU chains ARE reconstructed** on the last instruction of a NOR/NAND run (`alu::reconstruct_alu_chains`, wired into `VmpDevirtualizer::devirtualize_range`), and `decompose_chain` returns symbolic stack-slot names (`"vsp+0"`, `"vsp+8"`) rather than the old `"stack_val_1"`/`"stack_val_2"` placeholders. What remains open: the underlying chain-pattern table (which byte sequences count as a NOR/NAND chain) is unvalidated against real VMP samples, and slot naming is hardcoded to the x64 stack convention. Tracked as Q3 / Days 6-7 in `AUDIT_REPORT.md`.
 4. **Python subprocess dependency** for the Unicorn extraction path. Not required — the code falls back to static XOR-key analysis — but the `unicorn_extractor.py` script itself is not bundled in this repository yet (see `AUDIT_REPORT.md` §Q15).
 5. **Dual-bitness support (x86 PE32 + x86-64 PE32+) is new and only validated structurally.** `Bitness`-aware handling exists in the XOR key analyzer and handler classifier (entry size, XOR-immediate encoding, REX-prefix gating), and is covered by in-memory unit tests for both bitnesses, but has not been exercised end-to-end against a real 32-bit VMP-protected binary.
 
