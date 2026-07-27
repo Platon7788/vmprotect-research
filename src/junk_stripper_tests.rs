@@ -265,12 +265,10 @@ fn group_d_segment_prefix_before_reg_reg_op_is_stripped() {
 // tests for which live in the sibling `junk_stripper_folds_tests.rs`.
 // -----------------------------------------------------------------
 
-#[test]
-fn sanity_real_add_with_nonzero_imm_is_kept() {
-    // add rax, 5 — non-zero imm, real effect.
-    let body = [0x48, 0x83, 0xC0, 0x05, 0xC3];
-    assert_eq!(strip_junk(&body, Bitness::X64), body.to_vec());
-}
+// Commit U tautology sweep: the pre-existing
+// `sanity_real_add_with_nonzero_imm_is_kept` was byte-for-byte
+// identical to `group_c_add_reg_five_is_kept` above (same body,
+// same assertion). Deleted; the group_c test covers the case.
 
 #[test]
 fn sanity_real_mov_from_memory_is_kept() {

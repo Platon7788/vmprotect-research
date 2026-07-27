@@ -145,13 +145,30 @@ fn detector_identifies_vmprotect_from_vmp0_section_marker_string() {
 }
 
 #[test]
-fn detector_reports_confidence_and_reasons() {
+fn detector_report_reasons_match_confidence_source() {
+    // Tautology audit (Commit U): the previous shape was
+    // `assert!(report.confidence <= 100)` — impossible to fail
+    // because `FamilyScore::confidence` returns `points.min(100) as
+    // u8`. Replaced with an assertion that ties the reason strings
+    // (which are the audit trail) to a non-zero confidence: if the
+    // detector emits at least one reason it must ALSO have accrued
+    // points, and vice versa.
     let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0x00u8; 512]);
     let report = ProtectorDetector::detect(&binary).unwrap();
-    assert!(report.confidence <= 100, "confidence must be 0-100");
-    // Reasons may be empty for a truly clean binary — accept that.
-    // But: the report struct must be complete regardless.
-    let _ = report.reasons.len();
+    if !report.reasons.is_empty() {
+        assert!(
+            report.confidence > 0,
+            "reasons present ({:?}) but confidence is 0",
+            report.reasons
+        );
+    }
+    if report.confidence > 0 {
+        assert!(
+            !report.reasons.is_empty(),
+            "confidence {}/100 must come with at least one supporting reason",
+            report.confidence
+        );
+    }
 }
 
 #[test]

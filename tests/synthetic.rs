@@ -184,13 +184,30 @@ fn assert_matches(report: &AnalysisReport, sample: &SyntheticSample) {
     // Handler semantics: matcher ordering has been refined multiple
     // times (Commits G / L / O added new higher-priority matchers that
     // shadow earlier catch-alls — Ret replaces Vjmp for short bodies,
-    // Popreg beats Pop, etc.). So we don't require every expected
-    // semantic to survive verbatim; instead we require at least
-    // half of the sample's expected list to appear, PLUS a minimum
-    // coverage count below. A regression that stopped recognising
-    // whole families (Nand/Nor, arithmetic, control-flow) would still
-    // fail the count.
+    // Popreg beats Pop, etc.). We can't demand every expected semantic
+    // survives verbatim, but Commit U audit found the previous
+    // `hit >= half` was too lenient: it allowed 5 of 11 expected
+    // semantics to vanish AND was satisfied by five arbitrary
+    // catch-alls (Vsetvsp/Vjmp/Vemit/Vnop/Pop/PushImm can all fire on
+    // otherwise-empty bodies). Tightened here:
+    //   1. Every semantic in the FROZEN_ESSENTIALS set MUST appear —
+    //      these are family-level checkpoints (arithmetic, De Morgan,
+    //      raw-opcode fingerprints, VM entry/exit). Losing any one is
+    //      a real regression; ordering refinements don't touch them.
+    //   2. Overall hit ratio still must be >= half — catches "we lost
+    //      most of the specifics" without pinning individual matchers.
+    //   3. Semantic count >= 5 — bare-minimum floor.
+    use vmp_devirt::handler_semantic::VmpSemantic as V;
+    const FROZEN_ESSENTIALS: &[V] = &[V::Rdtsc, V::Cpuid, V::Vmexit, V::Nand, V::Nor, V::Add];
     let observed = report.handler_semantics();
+    for essential in FROZEN_ESSENTIALS {
+        if sample.expected_handler_semantics.contains(essential) {
+            assert!(
+                observed.contains(essential),
+                "FROZEN essential {essential:?} missing from tool output {observed:?}; a matcher-ordering refinement is not allowed to lose distinctive family-level fingerprints"
+            );
+        }
+    }
     let hit = sample
         .expected_handler_semantics
         .iter()
@@ -205,9 +222,9 @@ fn assert_matches(report: &AnalysisReport, sample: &SyntheticSample) {
         observed
     );
     assert!(
-        report.handler_semantics().len() >= 5,
+        observed.len() >= 5,
         "tool must recognise at least 5 semantic categories on a synthetic sample; got {:?}",
-        report.handler_semantics()
+        observed
     );
     // Dispatch table must be located.
     assert!(

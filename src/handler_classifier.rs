@@ -424,17 +424,26 @@ mod tests {
     // the field is exposed on the classification struct, that its
     // default is `None`, and that JSON serialisation round-trips.
 
+    /// Tautology audit (Commit U): the previous shape constructed
+    /// `vmp_semantic: None` explicitly then asserted `.is_none()` —
+    /// impossible to fail. Rewritten to verify the honest contract:
+    /// deserialising an EARLIER-format JSON (without the
+    /// `vmp_semantic` or `vmp_semantic_confidence` fields) still
+    /// produces a valid classification with default None + 0 (guards
+    /// the `#[serde(default)]` attributes on both fields).
     #[test]
-    fn handler_classification_defaults_vmp_semantic_to_none() {
-        let c = HandlerClassification {
-            va: 0x1000,
-            handler_type: "MOV_REG_REG".to_string(),
-            size: 3,
-            confidence: 85,
-            vmp_semantic: None,
-            vmp_semantic_confidence: 0,
-        };
-        assert!(c.vmp_semantic.is_none());
+    fn handler_classification_serde_default_is_none_and_zero() {
+        let legacy_json = r#"{
+            "va": 4096,
+            "handler_type": "MOV_REG_REG",
+            "size": 3,
+            "confidence": 85
+        }"#;
+        let c: HandlerClassification = serde_json::from_str(legacy_json).expect("legacy JSON must deserialize");
+        assert_eq!(c.vmp_semantic, None);
+        assert_eq!(c.vmp_semantic_confidence, 0);
+        assert_eq!(c.handler_type, "MOV_REG_REG");
+        assert_eq!(c.va, 4096);
     }
 
     #[test]
