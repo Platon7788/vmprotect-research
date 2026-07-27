@@ -194,6 +194,92 @@ pub(crate) const CODE_VIRTUALIZER_DISPATCHER: [Option<u8>; 7] = [
 ];
 
 // ---------------------------------------------------------------------
+// Structural VMP dispatcher fingerprint (Commit I)
+// ---------------------------------------------------------------------
+//
+// VMProtect's central dispatcher (every version, per NoVmp / cyber.wtf
+// writeups -- behaviour-only reference, see `RESEARCH_GAPS.md` §2.3/§4.1)
+// is a `mov r,[VIP]; xor r,key; add r,[table]; jmp [r]` chain. Unlike the
+// vendor stubs above this isn't one fixed byte sequence -- VMP randomises
+// register choice, instruction order (for the first three), and inserts
+// junk between steps -- so each primitive below matches an instruction
+// *shape* (opcode + ModR/M class) rather than literal bytes, and the
+// caller (`protector_signals::scan_rx_sections_for_dispatcher`) looks for
+// all four shapes co-occurring in a small sliding window.
+
+/// Skip a single REX prefix byte (0x40-0x4F) at `pos` if present, returning
+/// the position of the next opcode byte. Both x86 and x64 builds of VMP
+/// exist, so every predicate below has to tolerate the prefix being absent.
+fn skip_rex(window: &[u8], pos: usize) -> usize {
+    match window.get(pos).copied() {
+        Some(0x40..=0x4F) => pos + 1,
+        _ => pos,
+    }
+}
+
+/// `mov r64/r32, [r/m]` register-indirect load: opcode `0x8B`, ModR/M
+/// `mod == 00` and `r/m` not `4` (a SIB byte follows, a different
+/// addressing mode) or `5` (RIP-relative / disp32-only, likewise not the
+/// simple `[reg]` shape the VIP-pointer load uses).
+pub(crate) fn has_mov_indirect_load(window: &[u8]) -> bool {
+    (0..window.len()).any(|i| {
+        let p = skip_rex(window, i);
+        window.get(p).copied() == Some(0x8B)
+            && window
+                .get(p + 1)
+                .copied()
+                .map(|modrm| (modrm & 0xC0) == 0x00 && (modrm & 0x07) != 0x04 && (modrm & 0x07) != 0x05)
+                .unwrap_or(false)
+    })
+}
+
+/// `xor r64/r32, imm32` (opcode `0x81 /6`) or the imm8 short form
+/// (opcode `0x83 /6`), register-target ModR/M: `mod == 11`, `reg == 6`,
+/// i.e. `modrm & 0xF8 == 0xF0`.
+pub(crate) fn has_xor_reg_imm(window: &[u8]) -> bool {
+    (0..window.len()).any(|i| {
+        let p = skip_rex(window, i);
+        matches!(window.get(p).copied(), Some(0x81) | Some(0x83))
+            && window
+                .get(p + 1)
+                .copied()
+                .map(|modrm| (modrm & 0xF8) == 0xF0)
+                .unwrap_or(false)
+    })
+}
+
+/// `add r64/r32, r/m` (opcode `0x03`) -- any ModR/M shape. VMP's build
+/// most commonly uses a RIP-relative source (`mod == 00`, `r/m == 5`) to
+/// reach the handler table, but this predicate only fingerprints "an ADD
+/// pulling from memory into a register exists here", so any addressing
+/// mode counts.
+pub(crate) fn has_add_reg_mem(window: &[u8]) -> bool {
+    (0..window.len()).any(|i| {
+        let p = skip_rex(window, i);
+        window.get(p).copied() == Some(0x03) && window.get(p + 1).is_some()
+    })
+}
+
+/// Indirect `JMP [r/m]` (`FF /4`): opcode `0xFF`, ModR/M `reg == 4`, i.e.
+/// `modrm & 0x38 == 0x20`. Same instruction shape as
+/// `handler_semantic::has_indirect_jmp`, deliberately reimplemented here
+/// rather than shared -- that helper is scoped to classifying a single
+/// already-isolated handler body, this one is scoped to a whole-section
+/// sliding-window scan, and conflating the two call sites would make a
+/// future change to either one's semantics harder to reason about.
+pub(crate) fn has_indirect_jmp_ff4(window: &[u8]) -> bool {
+    (0..window.len()).any(|i| {
+        let p = skip_rex(window, i);
+        window.get(p).copied() == Some(0xFF)
+            && window
+                .get(p + 1)
+                .copied()
+                .map(|modrm| (modrm & 0x38) == 0x20)
+                .unwrap_or(false)
+    })
+}
+
+// ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
 

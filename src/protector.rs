@@ -230,6 +230,14 @@ impl ProtectorDetector {
         if contains_bytes(&binary.data, b"ZwProtectVirtualMemory") {
             vmprotect.add(15, "literal \"ZwProtectVirtualMemory\" string (VMP 3.x-era)");
         }
+        // Structural fingerprint (Commit I): the `mov/xor/add/jmp`
+        // dispatcher chain in an RX section. Section-name and string
+        // rules above all assume the vendor left recognisable markers;
+        // this one still fires when a wrapper (BattlEye BEDaisy, EAC)
+        // scrubs section names, since it only looks at instruction shape.
+        if signals::scan_rx_sections_for_dispatcher(binary).unwrap_or(false) {
+            vmprotect.add(45, "structural VMP dispatcher fingerprint in RX section");
+        }
 
         // --- Vendor: Themida / WinLicense ----------------------------
         for &name in THEMIDA_SECTION_NAMES {
