@@ -2,6 +2,7 @@
 //!
 //! Classifies VMP handlers by analyzing their bytecode patterns.
 
+use crate::handler_semantic::{SemanticMatcher, VmpSemantic};
 use crate::{Bitness, PEBinary};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -17,6 +18,14 @@ pub struct HandlerClassification {
     pub size: usize,
     /// Confidence score (0-100)
     pub confidence: u8,
+    /// VMP-semantic category recognised in the handler body, if any.
+    ///
+    /// Add-only field: `None` means the semantic matcher did not
+    /// recognise a fingerprint; consumers should fall back on
+    /// [`Self::handler_type`] as before. See
+    /// [`crate::handler_semantic`] for the matcher and enum.
+    #[serde(default)]
+    pub vmp_semantic: Option<VmpSemantic>,
 }
 
 /// Handler classifier
@@ -31,6 +40,7 @@ impl HandlerClassifier {
                 handler_type: "INVALID".to_string(),
                 size: 0,
                 confidence: 0,
+                vmp_semantic: None,
             });
         }
 
@@ -47,18 +57,25 @@ impl HandlerClassifier {
                     handler_type: "UNREADABLE".to_string(),
                     size: 0,
                     confidence: 0,
+                    vmp_semantic: None,
                 });
             }
         };
 
-        // Analyze bytecode patterns
+        // Analyze bytecode patterns (x86-instruction-level fallback).
         let (handler_type, size, confidence) = Self::analyze_bytecode(&bytecode, bitness);
+
+        // VMP-level semantic classifier. Runs independently of the x86
+        // fallback so the two layers can disagree without either
+        // silently masking the other -- consumers see both.
+        let vmp_semantic = SemanticMatcher::classify(&bytecode, bitness);
 
         Ok(HandlerClassification {
             va: handler_va,
             handler_type,
             size,
             confidence,
+            vmp_semantic,
         })
     }
 
@@ -250,6 +267,7 @@ impl HandlerClassifier {
                         handler_type: "ERROR".to_string(),
                         size: 0,
                         confidence: 0,
+                        vmp_semantic: None,
                     });
                 }
             }
@@ -324,5 +342,48 @@ mod tests {
         let (x64_type, ..) = HandlerClassifier::analyze_bytecode(&[0xC3], Bitness::X64);
         assert_eq!(x86_type, "RET");
         assert_eq!(x64_type, "RET");
+    }
+
+    // The following tests target the new `vmp_semantic` field wired
+    // into `HandlerClassification`. Full pattern coverage lives in
+    // `crate::handler_semantic::tests`; these tests only verify that
+    // the field is exposed on the classification struct, that its
+    // default is `None`, and that JSON serialisation round-trips.
+
+    #[test]
+    fn handler_classification_defaults_vmp_semantic_to_none() {
+        let c = HandlerClassification {
+            va: 0x1000,
+            handler_type: "MOV_REG_REG".to_string(),
+            size: 3,
+            confidence: 85,
+            vmp_semantic: None,
+        };
+        assert!(c.vmp_semantic.is_none());
+    }
+
+    #[test]
+    fn handler_classification_serializes_vmp_semantic() {
+        let c = HandlerClassification {
+            va: 0x1000,
+            handler_type: "MOV_REG_MEM".to_string(),
+            size: 4,
+            confidence: 85,
+            vmp_semantic: Some(VmpSemantic::Pop),
+        };
+        let json = serde_json::to_string(&c).expect("serialize");
+        assert!(json.contains("\"vmp_semantic\":\"Pop\""));
+        let back: HandlerClassification = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.vmp_semantic, Some(VmpSemantic::Pop));
+    }
+
+    #[test]
+    fn handler_classification_deserializes_without_field_for_backcompat() {
+        // Older JSON blobs (produced before Q2) will not contain the
+        // new field. `#[serde(default)]` on the struct field must let
+        // them round-trip into `None` rather than fail hard.
+        let older_json = r#"{"va":4096,"handler_type":"MOV_REG_REG","size":3,"confidence":85}"#;
+        let c: HandlerClassification = serde_json::from_str(older_json).expect("deserialize");
+        assert!(c.vmp_semantic.is_none());
     }
 }
