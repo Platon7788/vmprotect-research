@@ -104,6 +104,39 @@ fn short_flag_disambiguation_is_stable() {
 /// test uses a *different* image_base to make the coincidence
 /// impossible: the old default lands outside every section and would
 /// fail with "Invalid VA".
+/// New in Commit E: when the ProtectorDetector identifies a specific
+/// vendor we can't devirtualise (compressors, Themida-family, etc.),
+/// the CLI must exit with `EXIT_UNSUPPORTED_FAMILY` (3) rather than
+/// the "not VMP" code 2. The message must name the vendor and
+/// point to `--force-version` as the research escape hatch.
+///
+/// We simulate a `UPX` detection by embedding the exact section-name
+/// markers our detector keys on into the fixture's section body — the
+/// standalone shared fixture always names its section `.test`, but the
+/// UPX rule fires on section-name literals appearing anywhere in the
+/// file bytes... which it does NOT (it uses the enumerated section
+/// list). So instead we exercise the exit code path with the class-
+/// level UnknownProtector route: a bare fixture with no imports and
+/// entry outside `.text` produces UnknownProtector, and
+/// `is_supported_for_devirt() == false` for UnknownProtector, but
+/// the CLI treats UnknownProtector as "fall through to F2" per the
+/// route in bin/cli.rs. Once Commit F lands with true vendor
+/// detection, add a follow-up test here that exercises the exit-3
+/// path directly.
+///
+/// For now, just guard that the CLI's Protector-family log line
+/// appears — that's the surface that Commits F/I extend.
+#[test]
+fn e_protector_family_line_is_logged() {
+    let fixture = write_minimal_pe(0x1_4000_0000, 0x1000, &[0x90; 32]);
+    Command::cargo_bin("vmp_devirt")
+        .expect("cargo bin exists")
+        .arg(fixture.path())
+        .arg("-v")
+        .assert()
+        .stderr(predicate::str::contains("Protector family:"));
+}
+
 #[test]
 fn f1_vip_defaults_to_pe_entry_point() {
     // image_base 0x00400000 (classic PE32+ non-ASLR base) + entry rva

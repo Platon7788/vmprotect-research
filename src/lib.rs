@@ -27,6 +27,7 @@ pub mod handler_classifier;
 pub mod handler_semantic;
 pub mod opcode_table;
 pub mod pe_loader;
+pub mod protector;
 pub mod version;
 mod version_matchers;
 pub mod xor_key_analyzer;
@@ -46,6 +47,7 @@ pub use handler_classifier::{HandlerClassification, HandlerClassifier};
 pub use handler_semantic::{SemanticMatcher, VmpSemantic};
 pub use opcode_table::{Handler, OpcodeTable};
 pub use pe_loader::{Bitness, PEBinary};
+pub use protector::{ProtectorDetector, ProtectorFamily, ProtectorReport};
 pub use version::{VersionDetector, VmpVersion};
 pub use xor_key_analyzer::{XorKeyAnalyzer, XorKeyEntry};
 

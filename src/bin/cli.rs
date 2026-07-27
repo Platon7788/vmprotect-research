@@ -7,13 +7,19 @@ use clap::{Parser, ValueEnum};
 use log::info;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use vmp_devirt::{parse_hex_rva, VmpDevirtualizer, VmpVersion};
+use vmp_devirt::{parse_hex_rva, PEBinary, ProtectorDetector, ProtectorFamily, VmpDevirtualizer, VmpVersion};
 
 /// Exit code for the "not a VMP-protected binary" case (F2).
 ///
 /// Distinguished from 1 (generic anyhow error) so scripts and CI can
 /// branch on "unsupported input" without inspecting stderr.
 const EXIT_NOT_VMP: u8 = 2;
+
+/// Exit code for "packed / obfuscated by a family this tool does not
+/// know how to devirtualise" (Themida, Enigma, Denuvo, ...). Distinct
+/// from `EXIT_NOT_VMP` so scripts can distinguish "clean PE mistakenly
+/// fed to us" (2) from "correctly identified vendor we can't handle" (3).
+const EXIT_UNSUPPORTED_FAMILY: u8 = 3;
 
 /// Version override values accepted by `--force-version`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -112,6 +118,46 @@ fn main() -> anyhow::Result<ExitCode> {
         }
         None => None,
     };
+
+    // --- Family layer: run BEFORE VmpDevirtualizer so we route non-VMP
+    // binaries to a clean exit instead of pushing them through a
+    // VMProtect-shaped pipeline. --force-version is the research escape
+    // hatch that also bypasses this gate.
+    let pre_binary = PEBinary::load(&args.binary).context("Failed to load PE binary")?;
+    let family_report = ProtectorDetector::detect(&pre_binary).context("protector detection")?;
+    info!(
+        "Protector family: {} (confidence {}/100)",
+        family_report.family.as_str(),
+        family_report.confidence,
+    );
+    if args.verbose {
+        for reason in &family_report.reasons {
+            info!("  reason: {}", reason);
+        }
+    }
+
+    if args.force_version.is_none() && !family_report.family.is_supported_for_devirt() {
+        // We identified a real vendor (or a plausible obfuscation
+        // signal), it's just not one we can devirtualise. Report and
+        // exit cleanly with a distinct code, not the F2 "not VMP".
+        if family_report.family != ProtectorFamily::Unprotected
+            && family_report.family != ProtectorFamily::UnknownProtector
+        {
+            eprintln!(
+                "error: {} appears to be {} — not supported for devirtualisation by this tool.",
+                args.binary.display(),
+                family_report.family.as_str()
+            );
+            eprintln!("       Confidence {}/100. Reasons:", family_report.confidence);
+            for reason in &family_report.reasons {
+                eprintln!("         - {}", reason);
+            }
+            eprintln!("       Pass --force-version <vmp1|vmp2|vmp30|vmp35|vmp36> to bypass for research.");
+            return Ok(ExitCode::from(EXIT_UNSUPPORTED_FAMILY));
+        }
+        // Unprotected / UnknownProtector fall through to the F2 gate
+        // below, which has richer diagnostics (version+dispatch table).
+    }
 
     // Load binary and detect version
     let mut devirt = VmpDevirtualizer::new_with_hint(&args.binary, dispatch_rva_hint)?;

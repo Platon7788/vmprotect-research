@@ -198,9 +198,42 @@ impl VersionDetector {
                 }
             }
 
-            // "VMProtect" literal marker
+            // "VMProtect" literal marker (any version)
             if binary.data.windows(9).any(|w| w == b"VMProtect") {
                 vmp1.add(15, RulePriority::Marker, "literal \"VMProtect\" string present");
+            }
+
+            // API-usage markers — VMP switched from KERNEL32!VirtualProtect
+            // to NTDLL!ZwProtectVirtualMemory in the 3.x era. Presence of
+            // the Zw* form is a cheap 3.x-vs-2.x discriminator (see
+            // RESEARCH_GAPS.md §2.1 and hackyboiz VMP series).
+            if binary.data.windows(22).any(|w| w == b"ZwProtectVirtualMemory") {
+                vmp30.add(
+                    10,
+                    RulePriority::Marker,
+                    "literal \"ZwProtectVirtualMemory\" (VMP 3.x-era)",
+                );
+                vmp35.add(
+                    10,
+                    RulePriority::Marker,
+                    "literal \"ZwProtectVirtualMemory\" (VMP 3.x-era)",
+                );
+                vmp36.add(
+                    10,
+                    RulePriority::Marker,
+                    "literal \"ZwProtectVirtualMemory\" (VMP 3.x-era)",
+                );
+            }
+
+            // Anti-VM lookup strings that VMProtect ships in its runtime
+            // when the "Detect VirtualBox" option is enabled. Confirms
+            // ANY VMP version — cheap corroborating evidence.
+            if binary.data.windows(7).any(|w| w == b"VBoxRev") || binary.data.windows(7).any(|w| w == b"VBoxVer") {
+                vmp1.add(5, RulePriority::Marker, "VBoxRev/VBoxVer anti-VM marker");
+                vmp2.add(5, RulePriority::Marker, "VBoxRev/VBoxVer anti-VM marker");
+                vmp30.add(5, RulePriority::Marker, "VBoxRev/VBoxVer anti-VM marker");
+                vmp35.add(5, RulePriority::Marker, "VBoxRev/VBoxVer anti-VM marker");
+                vmp36.add(5, RulePriority::Marker, "VBoxRev/VBoxVer anti-VM marker");
             }
         }
 
