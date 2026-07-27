@@ -1,4 +1,5 @@
-//! Extended VMP-semantic matchers -- Commit L additions.
+//! Extended VMP-semantic matchers -- Commit L additions, extended
+//! further by Commit O.
 //!
 //! Split out of `handler_semantic.rs` via `#[path]` include so the impl
 //! file stays under the project's 500-line ceiling (see `CLAUDE.md`),
@@ -9,14 +10,10 @@
 //! Covers the arithmetic-base (`Mul`/`Imul`/`Div`/`Idiv`), shift/rotate
 //! (`Shl`/`Shr`/`Shld`/`Shrd`/`Rcl`/`Rcr`), and system/escape
 //! (`Lockor`/`VpushCr0`/`VpushCr3`/`Vnop`) families from
-//! `AUDIT_REPORT.md` Q2 / `RESEARCH_GAPS.md` §3.1.
-//!
-//! Skipped in this commit (see `handler_semantic.rs` module doc for
-//! the full rationale): `Vemit` and `Vexec` -- both need cross-handler
-//! data-flow (is the indirect jump target a VIP-stream literal, or does
-//! this handler recurse into a nested VM context) that a stateless,
-//! single-handler-body matcher can't establish without false positives
-//! against the existing `Vjmp`/`Ldd` shapes.
+//! `AUDIT_REPORT.md` Q2 / `RESEARCH_GAPS.md` §3.1 (Commit L), plus
+//! Commit O's `Ret` (short-body `Vjmp` variant), `Vemit` (raw-literal
+//! jump escape, standing in for the statelessly-identical `Vexec`),
+//! and `Popstk`/`Pushstk` (CTX-free VM-stack-to-VM-stack transfers).
 
 use super::*;
 
@@ -213,6 +210,92 @@ pub(super) fn is_vnop_shape(bytecode: &[u8]) -> bool {
         && !has_add_reg_imm8(bytecode)
         && !has_sub_reg_imm8(bytecode)
         && !has_add_reg_reg(bytecode)
+}
+
+// ---------------------------------------------------------------------
+// Group D: `Ret` -- real x86 return via VM (Commit O).
+//
+// Public writeups (r0da part 3, cyber.wtf) describe the VMP `Ret`
+// handler as byte-identical to `Vjmp` (load a VM-stack slot, bump VSP,
+// indirect-jump to the loaded value) but consistently the *shortest*
+// body in the dispatch table -- it just pops a return address and
+// goes, with none of the operand-decrypt or register-role bookkeeping
+// a real jump-target handler carries. We approximate that with a
+// body-length ceiling plus the `!has_xor_reg_imm` decrypt-absence
+// signal already used for `Vemit` below. `classify()` tries this
+// BEFORE `is_vjmp_shape` so a short, undecorated body is claimed here
+// first; a longer body falls through to the `Vjmp` label as before.
+// ---------------------------------------------------------------------
+
+/// Body-length ceiling for `Ret`: public writeups describe it as the
+/// shortest handler in the table (load, adjust, jump -- nothing else).
+const RET_MAX_LEN: usize = 30;
+
+pub(super) fn is_ret_shape(bytecode: &[u8]) -> bool {
+    bytecode.len() < RET_MAX_LEN && super::is_vjmp_shape(bytecode) && !has_xor_reg_imm(bytecode)
+}
+
+// ---------------------------------------------------------------------
+// Group E: `Vemit` -- raw x86 emit / escape (Commit O).
+//
+// `Vexec` (nested VM entry) is statelessly indistinguishable from this
+// shape -- both are "indirect jump to a VIP-stream-derived address with
+// no table lookup" from a single-handler-body view -- so we fold it
+// into `Vemit` per the module doc; a future cross-handler pass that
+// can tell "lands in a real code section" (Vemit) from "lands on
+// another dispatcher prologue" (Vexec) can split it out.
+// ---------------------------------------------------------------------
+
+/// Vemit: load-indirect (VIP stream) + indirect JMP, but with NEITHER
+/// of the two signals an ordinary table-driven jump handler carries:
+/// no XOR-decrypt of the loaded operand, no ADD-from-memory table
+/// lookup. `classify()` runs this AFTER `is_vjmp_shape` -- the ordinary
+/// jump shape is far more common, so it gets first claim on any body
+/// that happens to satisfy both.
+pub(super) fn is_vemit_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode)
+        && has_indirect_jmp(bytecode)
+        && !has_xor_reg_imm(bytecode)
+        && !has_add_reg_mem(bytecode)
+}
+
+// ---------------------------------------------------------------------
+// Group F: `Popstk` / `Pushstk` -- VM-stack <-> VM-stack transfers
+// (Commit O).
+//
+// Same load/adjust/store skeleton as the register `Pop`/`Push` family,
+// but strictly narrower: neither direction touches a CTX slot at all
+// (`!has_store_disp && !has_load_disp`), so the transfer stays entirely
+// within the VM stack.
+//
+// `Popstk` is disjoint from `Popreg` (`Popreg` *requires*
+// `has_store_disp` via its `is_pop_shape` base check, `Popstk` forbids
+// it), so it's reachable through `classify()` right ahead of the
+// generic `Pop` fallback, same as any other strict subset.
+//
+// `Pushstk` is NOT similarly disjoint from `PushImm`: `PushImm` never
+// checks `has_store_disp` at all, so whenever `Pushstk`'s shape holds,
+// `PushImm`'s (weaker) shape holds too. `classify()` runs `PushImm`
+// first (see `handler_semantic.rs` module doc, "`PushImm` vs
+// `Pushstk`"), so `Pushstk` is a future-extension slot in the same
+// vein as `Str` -- exercised directly against this matcher fn rather
+// than through `classify()`.
+// ---------------------------------------------------------------------
+
+pub(super) fn is_popstk_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode)
+        && has_add_reg_imm8(bytecode)
+        && has_store_indirect(bytecode)
+        && !has_store_disp(bytecode)
+        && !has_load_disp(bytecode)
+}
+
+pub(super) fn is_pushstk_shape(bytecode: &[u8]) -> bool {
+    has_load_indirect(bytecode)
+        && has_sub_reg_imm8(bytecode)
+        && has_store_indirect(bytecode)
+        && !has_store_disp(bytecode)
+        && !has_load_disp(bytecode)
 }
 
 #[cfg(test)]

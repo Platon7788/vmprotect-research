@@ -190,3 +190,30 @@ pub(super) fn count_load_indirect(bytecode: &[u8]) -> usize {
     }
     count
 }
+
+/// `XOR reg, imm8` (opcode 0x83 /6, mod=11, reg field=6 -> ModR/M in
+/// `0xF0..=0xF7`). Every ordinary VMP jump/pop/push handler decrypts
+/// its VIP-stream operand with an XOR-imm before using it; `Vemit`'s
+/// raw literal-jump escape and the very short `Ret` handlers are the
+/// two shapes that skip this step, so its absence is the distinguishing
+/// signal for both (Commit O).
+pub(super) fn has_xor_reg_imm(bytecode: &[u8]) -> bool {
+    has_group1_imm8(bytecode, 0xF0, 0xF7)
+}
+
+/// `ADD r, [r]` / `ADD r, [r+disp]` (opcode 0x03, `mod != 11`) -- the
+/// handler-table base-plus-index add ordinary jump handlers use when
+/// resolving a real dispatch-table entry. `Vemit`'s target comes
+/// straight from the VIP stream with no such table lookup, so its
+/// absence helps separate it from `Vjmp` (Commit O).
+pub(super) fn has_add_reg_mem(bytecode: &[u8]) -> bool {
+    (0..bytecode.len()).any(|i| {
+        let p = skip_rex(bytecode, i);
+        bytecode.get(p).copied() == Some(0x03)
+            && bytecode
+                .get(p + 1)
+                .copied()
+                .map(|m| (m & 0xC0) != 0xC0)
+                .unwrap_or(false)
+    })
+}

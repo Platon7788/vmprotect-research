@@ -13,11 +13,12 @@
 //! P0-blocked pairs a stateless matcher CAN'T fully distinguish
 //! (see `AUDIT_REPORT.md` Q2 + `RESEARCH_GAPS.md` §3.1):
 //!
-//! - `Ret` vs `Vjmp`: byte-identical; the label depends on whether
-//!   the popped value came from a prior `PUSH_IMM` (Vjmp) or a
-//!   `CALL`-style handler (Ret) -- cross-handler VM state we don't
-//!   see. classify() emits `Vjmp`; the `Ret` enum variant is left
-//!   in place so a later data-flow pass can promote it.
+//! - `Ret` vs `Vjmp`: byte-identical in general; Commit O narrows this
+//!   with a body-length + no-operand-decrypt heuristic (public
+//!   writeups describe `Ret` as the shortest handler in the table --
+//!   see `handler_semantic_ext.rs` Group D) instead of leaving it
+//!   permanently unpromoted. Longer bodies with the same shape still
+//!   fall through to `Vjmp`.
 //! - `Popreg` vs `Pop`: also byte-identical. We only promote to
 //!   `Popreg` on the tight `MOV [CTX+disp8], reg`-with-`disp8` in
 //!   `[0, 0x80)` shape (small CTX-slot index for a GPR); all other
@@ -25,6 +26,16 @@
 //! - `Ldd` vs `Str`: byte-identical without tracking whether the
 //!   final indirect store lands on `[VSP]` (Ldd) or `[addr]` (Str);
 //!   ordered Ldd-first with Str as a future-extension slot.
+//! - `PushImm` vs `Pushstk` (Commit O): also byte-identical in the
+//!   common case -- `PushImm`'s shape never inspects `has_store_disp`,
+//!   so whenever `Pushstk`'s stricter shape (same four conditions plus
+//!   `!has_store_disp`) holds, `PushImm`'s weaker shape holds too and
+//!   wins by running first. Same "future-extension slot, verified via
+//!   its own matcher fn rather than through `classify()`" treatment as
+//!   `Str`; see `handler_semantic_ext_tests.rs` for a direct-matcher
+//!   test. `Popstk` has no such collision with `Popreg` (`Popreg`
+//!   *requires* `has_store_disp`, so the two are disjoint) and IS
+//!   reachable through `classify()`.
 //!
 //! classify() ordering runs most-distinctive fingerprints first
 //! (single-instruction opcodes, then multi-op logic pairs, then
@@ -48,13 +59,35 @@
 //!   sibling (no load at all, vs. `Vsetvsp`'s single load-indirect),
 //!   so it must be tried first or `Vsetvsp` would never lose to it.
 //!
-//! `Vemit` / `Vexec` are intentionally NOT implemented -- see
-//! `handler_semantic_ext.rs` module doc for why the stateless-matcher
-//! signal is too weak to distinguish them from `Vjmp` / a nested-VM
-//! `Ldd`. `Popfd` (x86) vs `Popfq` (x64) are folded into the single
-//! `Popf` variant -- both are byte-identical (`0x9D`); the bitness
-//! parameter already threads through `classify()` if a future commit
-//! wants to split them.
+//! `Popfd` (x86) vs `Popfq` (x64) are folded into the single `Popf`
+//! variant -- both are byte-identical (`0x9D`); the bitness parameter
+//! already threads through `classify()` if a future commit wants to
+//! split them.
+//!
+//! Commit O closes out the remaining taxonomy entries (see
+//! `handler_semantic_ext.rs` Groups D/E/F for the added matcher
+//! bodies):
+//!
+//! - `Ret` runs right BEFORE `Vjmp`: same load+adjust+indirect-jump
+//!   shape, gated to short (`< 30` byte), non-decrypting bodies. A
+//!   longer body with the identical shape still falls through to
+//!   `Vjmp`, which is the far more common label.
+//! - `Vemit` runs right AFTER `Vjmp` -- it is the rarer "raw VIP
+//!   literal, no table lookup, no decrypt" escape shape, and `Vexec`
+//!   (nested VM entry) is folded into it as statelessly identical
+//!   (see `handler_semantic_ext.rs` Group E).
+//! - `Popstk` / `Pushstk` run right BEFORE their generic `Pop` / `Push`
+//!   fallbacks: same load+adjust+store skeleton, narrowed to bodies
+//!   that touch no CTX slot in either direction (strict subsets).
+//!   `Pushstk` additionally sits AFTER `PushImm` -- see the `PushImm`
+//!   vs `Pushstk` P0-blocked note above for why.
+//! - `Popf`'s shape is refined in place (same ordering slot) to also
+//!   require a short body with the `0x9D` byte near the tail, cutting
+//!   false positives from a `0x9D` deep inside an otherwise unrelated
+//!   longer body.
+//! - `Vsetvsp`'s catch-all shape is refined in place (same ordering
+//!   slot, still last) to also require a short body with exactly one
+//!   load -- `Vnop` remains strictly narrower and must still run first.
 
 use crate::Bitness;
 
@@ -65,8 +98,9 @@ use primitives::*;
 #[path = "handler_semantic_ext.rs"]
 mod ext;
 use ext::{
-    is_div_shape, is_idiv_shape, is_imul_shape, is_lockor_shape, is_mul_shape, is_rcl_shape, is_rcr_shape,
-    is_shl_shape, is_shld_shape, is_shr_shape, is_shrd_shape, is_vnop_shape, is_vpush_cr0_shape, is_vpush_cr3_shape,
+    is_div_shape, is_idiv_shape, is_imul_shape, is_lockor_shape, is_mul_shape, is_popstk_shape, is_pushstk_shape,
+    is_rcl_shape, is_rcr_shape, is_ret_shape, is_shl_shape, is_shld_shape, is_shr_shape, is_shrd_shape, is_vemit_shape,
+    is_vnop_shape, is_vpush_cr0_shape, is_vpush_cr3_shape,
 };
 
 /// VMP-semantic handler category from the cross-validated taxonomy in
@@ -81,8 +115,17 @@ use ext::{
 pub enum VmpSemantic {
     // Data movement (VM-stack).
     Pop,
+    /// VM-stack-to-VM-stack pop: same load+adjust+store shape as `Pop`
+    /// but never touches a CTX slot in either direction (Commit O).
+    /// Runs before the generic `Pop` fallback -- strict subset.
     Popstk,
     Push,
+    /// VM-stack-to-VM-stack push: `Popstk`'s counterpart. Same
+    /// byte-identical-collision situation as `Ldd`/`Str` (see module
+    /// doc): `PushImm`'s shape doesn't check `has_store_disp`, so it
+    /// always wins first for a body that would also satisfy this
+    /// shape. Kept as a future-extension slot, verified directly via
+    /// its internal matcher fn rather than through `classify()`.
     Pushstk,
     Pushreg,
     /// Push of an immediate operand read from the VIP stream. Split
@@ -130,11 +173,26 @@ pub enum VmpSemantic {
 
     // Control-flow.
     Vjmp,
+    /// Real x86 return via the VM: byte-identical to `Vjmp`'s
+    /// load+adjust+indirect-jump shape, distinguished by a short body
+    /// and the absence of any operand-decrypt XOR (Commit O). Runs
+    /// before `Vjmp` in `classify()`; a longer body with the same
+    /// shape still falls through to `Vjmp`.
     Ret,
     Vmexit,
 
     // Escape / meta.
+    /// Raw x86 emit / escape: indirect jump to a VIP-stream-derived
+    /// address with no handler-table lookup (no XOR-decrypt, no
+    /// ADD-from-memory) -- Commit O. Runs after `Vjmp` (the far more
+    /// common shape gets first claim).
     Vemit,
+    /// Nested VM entry: statelessly identical to `Vemit` from a
+    /// single-handler-body view (both are "jump to a VIP-derived
+    /// address, no table lookup"); `classify()` only ever emits
+    /// `Vemit` for this shape. Kept as a distinct enum variant for a
+    /// future cross-handler pass that can tell "lands in real code"
+    /// from "lands on another dispatcher prologue".
     Vexec,
     Vnop,
     Vunk,
@@ -150,14 +208,22 @@ pub struct SemanticMatcher;
 impl SemanticMatcher {
     /// Classify a handler body. `None` = no fingerprint matched.
     ///
-    /// Ordering (see module doc for full rationale, Commit L extends
-    /// it): single-instruction opcodes (Rdtsc, Cpuid, VpushCr0/Cr3)
-    /// -> Vmexit -> Lockor -> Nand/Nor -> arithmetic-base F7 family
-    /// (Mul/Imul/Div/Idiv) -> Add (before Push family, which shares
-    /// load-indirect + store-indirect) -> shifts/rotates
-    /// (Shl/Shr/Shld/Shrd/Rcl/Rcr) -> Ldd/Str (two-load shapes) ->
-    /// Pushreg/PushImm/Push fallback -> Popreg/Pop fallback -> Vjmp
-    /// -> Popf -> Vnop -> Vsetvsp catch-all.
+    /// Ordering (see module doc for full rationale; Commit L extends
+    /// it, Commit O extends it further): single-instruction opcodes
+    /// (Rdtsc, Cpuid, VpushCr0/Cr3) -> Vmexit -> Lockor -> Nand/Nor ->
+    /// arithmetic-base F7 family (Mul/Imul/Div/Idiv) -> Add (before
+    /// Push family, which shares load-indirect + store-indirect) ->
+    /// shifts/rotates (Shl/Shr/Shld/Shrd/Rcl/Rcr) -> Ldd/Str (two-load
+    /// shapes) -> Pushreg/PushImm/Pushstk/Push fallback ->
+    /// Popreg/Popstk/Pop fallback -> Ret -> Vjmp -> Vemit -> Popf ->
+    /// Vnop -> Vsetvsp catch-all. `Popstk` sits directly ahead of the
+    /// generic `Pop` fallback (strict subset, and disjoint from
+    /// `Popreg`, so it's actually reachable); `Pushstk` sits directly
+    /// after `PushImm` (byte-identical collision -- `PushImm` always
+    /// wins first, see module doc); `Ret` sits directly ahead of
+    /// `Vjmp` (short-body variant of the same shape); `Vemit` sits
+    /// directly after `Vjmp` (rarer sibling shape, folds in the
+    /// statelessly-identical `Vexec`).
     pub fn classify(bytecode: &[u8], bitness: Bitness) -> Option<VmpSemantic> {
         let _ = bitness;
         if bytecode.is_empty() {
@@ -232,17 +298,29 @@ impl SemanticMatcher {
         if is_pushimm_shape(bytecode) {
             return Some(VmpSemantic::PushImm);
         }
+        if is_pushstk_shape(bytecode) {
+            return Some(VmpSemantic::Pushstk);
+        }
         if is_push_shape(bytecode) {
             return Some(VmpSemantic::Push);
         }
         if is_popreg_shape(bytecode) {
             return Some(VmpSemantic::Popreg);
         }
+        if is_popstk_shape(bytecode) {
+            return Some(VmpSemantic::Popstk);
+        }
         if is_pop_shape(bytecode) {
             return Some(VmpSemantic::Pop);
         }
+        if is_ret_shape(bytecode) {
+            return Some(VmpSemantic::Ret);
+        }
         if is_vjmp_shape(bytecode) {
             return Some(VmpSemantic::Vjmp);
+        }
+        if is_vemit_shape(bytecode) {
+            return Some(VmpSemantic::Vemit);
         }
         if is_popf_shape(bytecode) {
             return Some(VmpSemantic::Popf);
@@ -370,10 +448,17 @@ fn is_popreg_shape(bytecode: &[u8]) -> bool {
     store_count == 1 && matches!(first_disp8, Some(d) if d < 0x80)
 }
 
-/// Vsetvsp: load-indirect only, no adjust, no stores, no jump.
-/// Strictest "matched nothing else" catch-all; runs last.
+/// Vsetvsp: exactly one load-indirect, no adjust, no stores, no jump,
+/// AND a short body (< 12 bytes). Strictest "matched nothing else"
+/// catch-all; runs last. Commit O adds the length + single-load gate
+/// -- the shape is intrinsically similar to `Vnop`'s (both are "just a
+/// VSP touch and nothing else"), so `Vnop` must keep running first or
+/// `Vsetvsp` would never lose to it; the extra gate here only trims
+/// false positives from a longer body that happens to carry a lone
+/// stray load-indirect nowhere near the real handler-body pattern.
 fn is_vsetvsp_shape(bytecode: &[u8]) -> bool {
-    has_load_indirect(bytecode)
+    bytecode.len() < 12
+        && count_load_indirect(bytecode) == 1
         && !has_add_reg_imm8(bytecode)
         && !has_sub_reg_imm8(bytecode)
         && !has_store_indirect(bytecode)
@@ -381,12 +466,24 @@ fn is_vsetvsp_shape(bytecode: &[u8]) -> bool {
         && !has_indirect_jmp(bytecode)
 }
 
-/// Popf: bare POPFQ (0x9D). Vmexit runs first; anything reaching
-/// here with 0x9D is a real POPF outside a vmexit frame.
+/// Popf: bare POPFQ (0x9D), refined (Commit O) to require a short body
+/// (< 20 bytes) with the 0x9D sitting within the last 8 bytes. Vmexit
+/// runs first, so this only sees POPF outside a vmexit frame; the
+/// added position/length gate keeps a 0x9D deep inside a longer,
+/// unrelated body (e.g. a coincidental immediate byte) from being
+/// misread as a real POPF handler.
 fn is_popf_shape(bytecode: &[u8]) -> bool {
-    has_popfq(bytecode)
+    if bytecode.len() >= 20 {
+        return false;
+    }
+    let near_end = bytecode.len().saturating_sub(8);
+    has_popfq(&bytecode[near_end..])
 }
 
 #[cfg(test)]
 #[path = "handler_semantic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "handler_semantic_o_tests.rs"]
+mod tests_o;

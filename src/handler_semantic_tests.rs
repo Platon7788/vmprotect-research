@@ -135,14 +135,18 @@ fn push_shape_detected_x64_promotes_to_pushimm() {
 }
 
 #[test]
-fn vjmp_shape_detected_x64() {
-    // MOV rax, [r14]; ADD r14, 8; JMP [rip+disp32]. No CTX store,
-    // no VM-stack store -- pattern lands on VJMP rather than POP.
-    let body = [
+fn vjmp_shape_detected_x64_when_body_is_long() {
+    // MOV rax, [r14]; ADD r14, 8; <NOP filler>; JMP [rip+disp32]. No
+    // CTX store, no VM-stack store -- pattern lands on VJMP rather
+    // than POP. Padded to >= 30 bytes so this exercises the `Vjmp`
+    // fallback specifically: the short-body version of this exact
+    // shape is `Ret` under Commit O (see `ret_shape_detected_x64`).
+    let mut body = vec![
         0x49, 0x8B, 0x06, // MOV rax, [r14]
         0x49, 0x83, 0xC6, 0x08, // ADD r14, 8
-        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
     ];
+    body.extend(std::iter::repeat_n(0x90, 20));
+    body.extend([0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]); // JMP [rip+disp32]
     assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vjmp));
 }
 
@@ -185,14 +189,20 @@ fn single_not_and_and_is_not_nand() {
 }
 
 #[test]
-fn stray_popfq_without_ret_is_popf() {
-    // POPFQ far from any 0xC3 doesn't trigger Vmexit but DOES trigger
-    // the new Popf fallback (Commit G). The 0xC3 at index 41 is > 32
-    // bytes past the 0x9D, so the Vmexit window check fails.
+fn stray_popfq_deep_in_long_body_is_rejected_by_commit_o_refinement() {
+    // POPFQ far from any 0xC3 doesn't trigger Vmexit (the 0xC3 at
+    // index 41 is > 32 bytes past the 0x9D, so the Vmexit window
+    // check fails) -- and, since Commit O's Popf refinement requires
+    // BOTH a short body (< 20 bytes) and the 0x9D within the last 8
+    // bytes, this 42-byte body with a 0x9D at the very start no
+    // longer trips Popf either. This is exactly the false-positive
+    // this refinement was meant to close (see `handler_semantic.rs`
+    // module doc): a stray 0x9D deep inside an otherwise unrelated
+    // body used to be misread as a real POPF handler (Commit G).
     let mut body = vec![0x9D];
     body.extend(std::iter::repeat_n(0x90, 40));
     body.push(0xC3);
-    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Popf));
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
 }
 
 #[test]
@@ -399,10 +409,12 @@ fn vsetvsp_shape_detected() {
 
 #[test]
 fn vsetvsp_rejected_when_jump_present() {
-    // Add a dispatcher JMP: has_indirect_jmp fires, Vsetvsp guard
-    // rejects it, and no other matcher fits -> None.
+    // Add a dispatcher JMP: has_indirect_jmp fires and Vsetvsp's guard
+    // rejects it. Commit O's Vemit (load-indirect + indirect-jmp, no
+    // XOR-decrypt, no ADD-from-memory) now claims this residual shape
+    // instead of leaving it as None.
     let body = [0x4D, 0x8B, 0x36, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00];
-    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vemit));
 }
 
 #[test]

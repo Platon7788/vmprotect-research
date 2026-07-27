@@ -134,15 +134,17 @@ fn rcr_shape_detected_x64() {
 }
 
 #[test]
-fn shl_missing_pushfq_yields_none() {
+fn shl_missing_pushfq_falls_through_to_vemit() {
     // Same as shl_shape_detected_x64 but PUSHFQ removed: is_shl_shape
-    // needs the flags store, and the surviving load+store+jmp shape
-    // doesn't fit any other matcher (Vsetvsp's `!has_store_indirect`
-    // guard rejects it; Vjmp needs an imm8 VSP adjust we don't have).
+    // needs the flags store; Vsetvsp's `!has_store_indirect` guard
+    // rejects the surviving shape and Vjmp needs an imm8 VSP adjust we
+    // don't have. Commit O's Vemit (load-indirect + indirect-jmp, no
+    // XOR-decrypt, no ADD-from-memory) now claims this residual shape
+    // instead of leaving it as None.
     let body = [
         0x49, 0x8B, 0x06, 0xD3, 0xE0, 0x49, 0x89, 0x06, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
     ];
-    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vemit));
 }
 
 #[test]
@@ -246,8 +248,11 @@ fn vnop_rejected_when_vsp_adjust_present() {
 #[test]
 fn vnop_rejected_when_load_indirect_present() {
     // A real load-indirect present alongside the tail JMP: Vnop's
-    // `!has_load_indirect` guard rejects it, and Vsetvsp's `!has_indirect_jmp`
-    // guard rejects it too (jmp present) -- both catch-alls lose, None.
+    // `!has_load_indirect` guard rejects it, and Vsetvsp's
+    // `!has_indirect_jmp` guard rejects it too (jmp present) -- both
+    // catch-alls lose. This exact load+jmp shape is also Commit O's
+    // canonical Vemit fingerprint (no XOR-decrypt, no ADD-from-memory),
+    // so it now claims the body instead of leaving it as None.
     let body = [0x49, 0x8B, 0x06, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00];
-    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Vemit));
 }
