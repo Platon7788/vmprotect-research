@@ -31,6 +31,10 @@
 
 use crate::Bitness;
 
+#[path = "register_roles_consistency.rs"]
+mod consistency;
+pub use consistency::HandlerCounts;
+
 /// x86 register identifier. r0..r7 on x86; r0..r15 on x64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(missing_docs)]
@@ -106,7 +110,7 @@ impl Register {
 /// role — either not enough signal, or two candidates too close to
 /// call. Consumers should treat `None` as "unknown" and not fall back
 /// to the runner-up.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RegisterRoles {
     /// Candidate VSP (VM stack pointer) — the register with the highest
     /// count of indirect memory accesses (both loads and stores at
@@ -126,6 +130,20 @@ pub struct RegisterRoles {
     /// confidence — consumers should treat sub-16-handler results as
     /// noisy.
     pub handlers_seen: usize,
+    /// Fraction 0.0-1.0 of handlers whose per-handler dominant VSP
+    /// register agrees with the aggregate winner in [`Self::vsp`].
+    /// Zero when `vsp` is `None` or `handlers_seen == 0`. Below
+    /// [`CONSISTENCY_THRESHOLD`] the aggregate is treated as noise and
+    /// `vsp` is coerced to `None`.
+    pub vsp_consistency: f64,
+    /// Fraction 0.0-1.0 of handlers whose per-handler dominant VIP
+    /// register agrees with the aggregate winner in [`Self::vip`]. See
+    /// [`Self::vsp_consistency`] for gating semantics.
+    pub vip_consistency: f64,
+    /// Fraction 0.0-1.0 of handlers whose per-handler dominant VKEY
+    /// register agrees with the aggregate winner in [`Self::vkey`].
+    /// See [`Self::vsp_consistency`] for gating semantics.
+    pub vkey_consistency: f64,
 }
 
 /// Analyse a set of handler bodies and vote on register roles.
@@ -139,11 +157,35 @@ pub fn analyse_handlers(handlers: &[Vec<u8>], bitness: Bitness) -> RegisterRoles
     for body in handlers {
         walk_handler(body, bitness, &mut counters);
     }
+
+    let vsp_winner = vote_vsp(&counters);
+    let vip_winner = vote_vip(&counters);
+    let vkey_winner = vote_vkey(&counters);
+
+    // Cross-handler consistency gate (RESEARCH_GAPS.md §7 item #7).
+    // Aggregate argmax is easily biased when a few large handlers
+    // dominate the counts; re-checking per-handler dominance surfaces
+    // that bias and flips the winner back to `None` when the
+    // fraction-of-agreeing-handlers falls below the confidence bar.
+    let (vsp_consistency, vsp_runners) =
+        consistency::handler_agreement(handlers, bitness, vsp_winner, &consistency::vsp_score);
+    let (vip_consistency, vip_runners) =
+        consistency::handler_agreement(handlers, bitness, vip_winner, &consistency::vip_score);
+    let (vkey_consistency, vkey_runners) =
+        consistency::handler_agreement(handlers, bitness, vkey_winner, &consistency::vkey_score);
+
+    let vsp = consistency::apply_consistency_gate("vsp", vsp_winner, vsp_consistency, &vsp_runners);
+    let vip = consistency::apply_consistency_gate("vip", vip_winner, vip_consistency, &vip_runners);
+    let vkey = consistency::apply_consistency_gate("vkey", vkey_winner, vkey_consistency, &vkey_runners);
+
     let roles = RegisterRoles {
-        vsp: vote_vsp(&counters),
-        vip: vote_vip(&counters),
-        vkey: vote_vkey(&counters),
+        vsp,
+        vip,
+        vkey,
         handlers_seen: handlers.len(),
+        vsp_consistency,
+        vip_consistency,
+        vkey_consistency,
     };
     log_top_candidates(&counters, &roles);
     roles

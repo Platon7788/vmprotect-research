@@ -58,6 +58,13 @@ fn vsp_detected_when_r14_dominates_indirect_accesses() {
     let roles = analyse_handlers(&handlers, Bitness::X64);
     assert_eq!(roles.vsp, Some(Register::R14));
     assert_eq!(roles.handlers_seen, 5);
+    // Q: every handler agrees on r14 as the VSP, so cross-handler
+    // consistency is unity.
+    assert!(
+        (roles.vsp_consistency - 1.0).abs() < f64::EPSILON,
+        "vsp_consistency={} but every handler dominates on r14",
+        roles.vsp_consistency
+    );
 }
 
 #[test]
@@ -65,6 +72,11 @@ fn vip_detected_when_r15_is_incremented_and_loaded_from() {
     let handlers: Vec<Vec<u8>> = (0..5).map(|_| vip_r15_body()).collect();
     let roles = analyse_handlers(&handlers, Bitness::X64);
     assert_eq!(roles.vip, Some(Register::R15));
+    assert!(
+        (roles.vip_consistency - 1.0).abs() < f64::EPSILON,
+        "vip_consistency={} but every handler dominates on r15",
+        roles.vip_consistency
+    );
 }
 
 #[test]
@@ -72,20 +84,48 @@ fn vkey_detected_when_rbx_is_xored_with_imm() {
     let handlers: Vec<Vec<u8>> = (0..5).map(|_| vkey_rbx_body()).collect();
     let roles = analyse_handlers(&handlers, Bitness::X64);
     assert_eq!(roles.vkey, Some(Register::Rbx));
+    assert!(
+        (roles.vkey_consistency - 1.0).abs() < f64::EPSILON,
+        "vkey_consistency={} but every handler dominates on rbx",
+        roles.vkey_consistency
+    );
 }
 
 #[test]
 fn combined_signal_populates_all_three_roles() {
-    // Mixed corpus so vsp/vip/vkey each have their own dominant reg.
-    let mut handlers: Vec<Vec<u8>> = Vec::new();
-    handlers.extend((0..5).map(|_| vsp_r14_body()));
-    handlers.extend((0..5).map(|_| vip_r15_body()));
-    handlers.extend((0..5).map(|_| vkey_rbx_body()));
+    // Q: with the cross-handler consistency gate, "combined signal" must
+    // be a single handler exhibiting ALL three shapes at once — a
+    // 5+5+5 corpus split across three shapes now fails the >=60%
+    // per-handler agreement bar for each role (each shape appears in
+    // only a third of handlers). This mirrors real VMP samples where
+    // every handler references VSP/VIP even when it only writes VKEY.
+    let combined_body: Vec<u8> = {
+        let mut b = vsp_r14_body();
+        b.extend(vip_r15_body());
+        b.extend(vkey_rbx_body());
+        b
+    };
+    let handlers: Vec<Vec<u8>> = (0..5).map(|_| combined_body.clone()).collect();
     let roles = analyse_handlers(&handlers, Bitness::X64);
     assert_eq!(roles.vsp, Some(Register::R14));
     assert_eq!(roles.vip, Some(Register::R15));
     assert_eq!(roles.vkey, Some(Register::Rbx));
-    assert_eq!(roles.handlers_seen, 15);
+    assert_eq!(roles.handlers_seen, 5);
+    assert!(
+        (roles.vsp_consistency - 1.0).abs() < f64::EPSILON,
+        "vsp_consistency={} but every handler carries the same r14 VSP shape",
+        roles.vsp_consistency
+    );
+    assert!(
+        (roles.vip_consistency - 1.0).abs() < f64::EPSILON,
+        "vip_consistency={} but every handler carries the same r15 VIP shape",
+        roles.vip_consistency
+    );
+    assert!(
+        (roles.vkey_consistency - 1.0).abs() < f64::EPSILON,
+        "vkey_consistency={} but every handler carries the same rbx VKEY shape",
+        roles.vkey_consistency
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -208,6 +248,9 @@ fn register_roles_default_is_all_none() {
     let r = RegisterRoles::default();
     assert!(r.vsp.is_none() && r.vip.is_none() && r.vkey.is_none());
     assert_eq!(r.handlers_seen, 0);
+    assert_eq!(r.vsp_consistency, 0.0);
+    assert_eq!(r.vip_consistency, 0.0);
+    assert_eq!(r.vkey_consistency, 0.0);
 }
 
 #[test]
@@ -217,8 +260,101 @@ fn register_roles_round_trips_json() {
         vip: Some(Register::R15),
         vkey: Some(Register::Rbx),
         handlers_seen: 42,
+        vsp_consistency: 1.0,
+        vip_consistency: 0.85,
+        vkey_consistency: 0.7,
     };
     let json = serde_json::to_string(&r).expect("serialize");
     let back: RegisterRoles = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(r, back);
+}
+
+// ---------------------------------------------------------------------
+// Cross-handler consistency gate (Commit Q — Part A)
+// ---------------------------------------------------------------------
+
+/// Fabricated corpus: two thirds of handlers use r14 as VSP, one third
+/// uses r8. Aggregate VSP argmax picks r14 (2*count > 1*count) but
+/// per-handler agreement is only 2/3 ≈ 0.67 — comfortably above the
+/// 0.6 gate, so the aggregate winner survives. This nails down the
+/// gate's "just above threshold" behaviour.
+#[test]
+fn vsp_consistency_around_two_thirds_keeps_aggregate_winner() {
+    let r14_body = vsp_r14_body();
+    let r8_body: Vec<u8> = vec![
+        0x49, 0x8B, 0x00, // MOV rax, [r8]
+        0x49, 0x89, 0x00, // MOV [r8], rax
+    ];
+    let mut handlers: Vec<Vec<u8>> = Vec::new();
+    handlers.extend((0..6).map(|_| r14_body.clone()));
+    handlers.extend((0..3).map(|_| r8_body.clone()));
+    let roles = analyse_handlers(&handlers, Bitness::X64);
+    assert_eq!(roles.vsp, Some(Register::R14));
+    assert!(
+        roles.vsp_consistency > 0.6 && roles.vsp_consistency < 0.75,
+        "vsp_consistency={} expected in (0.6, 0.75)",
+        roles.vsp_consistency
+    );
+}
+
+/// Fabricated corpus: three "large" handlers each carry many r14
+/// indirect accesses (10 counts apiece); five "small" handlers each
+/// carry only two r8 indirect accesses. Aggregate argmax picks r14
+/// comfortably (30 counts vs 10, clearing the 60% dominance ratio),
+/// BUT per-handler agreement is only 3/8 = 0.375 — below the 0.6
+/// gate — so the role must revert to `None`. This is the bias the
+/// consistency gate exists to catch: a handful of large handlers
+/// swamping many small ones with the wrong convention.
+#[test]
+fn vsp_reverts_to_none_when_large_handlers_bias_aggregate() {
+    // 5x MOV/MOV pairs on r14 -> 10 indirect touches per handler.
+    let large_r14_body: Vec<u8> = std::iter::repeat_n(vsp_r14_body(), 5).flatten().collect();
+    // Single MOV/MOV pair on r8 -> 2 indirect touches per handler.
+    let small_r8_body: Vec<u8> = vec![
+        0x49, 0x8B, 0x00, // MOV rax, [r8]
+        0x49, 0x89, 0x00, // MOV [r8], rax
+    ];
+    let mut handlers: Vec<Vec<u8>> = Vec::new();
+    handlers.extend((0..3).map(|_| large_r14_body.clone()));
+    handlers.extend((0..5).map(|_| small_r8_body.clone()));
+    let roles = analyse_handlers(&handlers, Bitness::X64);
+    assert_eq!(
+        roles.vsp, None,
+        "aggregate winner r14 (30 vs 10 counts) must be dropped because \
+         per-handler consistency is 3/8 = 0.375"
+    );
+    assert!(
+        (roles.vsp_consistency - 3.0 / 8.0).abs() < 1e-9,
+        "vsp_consistency={} expected 0.375",
+        roles.vsp_consistency
+    );
+}
+
+/// VIP consistency: two large handlers dominated by r15 (5 inc counts
+/// each) against five small handlers each incrementing r13 once.
+/// Aggregate `inc` totals: r15=10, r13=5 → r15 wins the argmax +
+/// dominance gate. Per-handler agreement: 2/7 ≈ 0.286 — below the
+/// 0.6 gate — so the role reverts to `None`.
+#[test]
+fn vip_reverts_to_none_when_large_handlers_bias_aggregate() {
+    // 5x (ADD r15,4; MOV rax,[r15]) — one inc + one indirect_load per rep.
+    let large_r15_body: Vec<u8> = std::iter::repeat_n(vip_r15_body(), 5).flatten().collect();
+    // ADD r13,4 = 49 83 C5 04. r13 in indirect memory form requires
+    // SIB/disp8, so we skip that here — this handler only touches
+    // `inc[r13]`, which is enough to make r13 dominant in it.
+    let small_r13_body: Vec<u8> = vec![0x49, 0x83, 0xC5, 0x04];
+    let mut handlers: Vec<Vec<u8>> = Vec::new();
+    handlers.extend((0..2).map(|_| large_r15_body.clone()));
+    handlers.extend((0..5).map(|_| small_r13_body.clone()));
+    let roles = analyse_handlers(&handlers, Bitness::X64);
+    assert_eq!(
+        roles.vip, None,
+        "aggregate winner r15 (10 vs 5 inc counts) must be dropped because \
+         per-handler consistency is 2/7 ≈ 0.286"
+    );
+    assert!(
+        (roles.vip_consistency - 2.0 / 7.0).abs() < 1e-9,
+        "vip_consistency={} expected ~0.286",
+        roles.vip_consistency
+    );
 }

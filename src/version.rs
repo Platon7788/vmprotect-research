@@ -15,7 +15,7 @@ use crate::PEBinary;
 use anyhow::{Context, Result};
 
 /// Supported VMP versions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VmpVersion {
     /// VMProtect 1.x
     Vmp1,
@@ -27,7 +27,11 @@ pub enum VmpVersion {
     Vmp35,
     /// VMProtect 3.6-3.10.5
     Vmp36Plus,
-    /// Unknown version
+    /// Unknown version — used as the [`Default`] variant so a fresh
+    /// [`VmpVersionDetail::default`] value reads as "no detection yet"
+    /// and matches what `detect` returns for a bare PE below the
+    /// confidence threshold.
+    #[default]
     Unknown,
 }
 
@@ -84,13 +88,63 @@ const MIN_CONFIDENCE_THRESHOLD: u16 = 40;
 /// Byte window scanned from the entry point when looking for stub patterns.
 const ENTRY_SCAN_WINDOW: usize = 32;
 
+/// Version detection result plus sub-version hints (Q — Part B).
+///
+/// [`VmpVersion`] intentionally stays a coarse enum — cracking it open
+/// into 3.6 vs 3.7 vs 3.8 vs 3.10.5 buckets would be a semver break
+/// for consumers who match on it. Instead, [`VersionDetector::detect_detailed`]
+/// returns this wrapper: the same [`VmpVersion`] plus a list of string
+/// hints that narrow the 3.x range. The CLI logs these at info level;
+/// programmatic consumers can inspect them for downstream heuristics.
+///
+/// Hints are `&'static str` because every one comes from a table baked
+/// into `version.rs`; there is no user-supplied text in the payload.
+#[derive(Debug, Clone, Default)]
+pub struct VmpVersionDetail {
+    /// Coarse version bucket, same value the plain
+    /// [`VersionDetector::detect`] would return.
+    pub version: VmpVersion,
+    /// Zero or more sub-version hints — presence of a specific marker
+    /// (e.g. `LdrLoadDll` for 3.8+, `RtlAddFunctionTable` for 3.10.5)
+    /// narrows the range inside [`VmpVersion::Vmp36Plus`]. Order is the
+    /// order in which markers fired.
+    pub sub_hints: Vec<&'static str>,
+}
+
 /// VMP Version Detector
 pub struct VersionDetector;
 
 impl VersionDetector {
     /// Detect VMP version from binary. Returns the best-matching version
     /// along with a 0-100 confidence score.
+    ///
+    /// Thin wrapper around [`Self::detect_detailed`] that discards the
+    /// sub-version hint list — preserved for callers that only need
+    /// the coarse bucket. Public API contract unchanged from earlier
+    /// revisions.
     pub fn detect(binary: &PEBinary) -> Result<(VmpVersion, u8)> {
+        let (detail, confidence) = Self::detect_detailed(binary)?;
+        Ok((detail.version, confidence))
+    }
+
+    /// Detect VMP version and return the same coarse bucket plus every
+    /// sub-version hint that fired (Q — Part B).
+    ///
+    /// Hints refine the 3.x range:
+    ///
+    /// - `LdrLoadDll` literal — VMP 3.8+ (DLL-loader stub name-drops it).
+    /// - `RtlAddFunctionTable` literal — VMP 3.10.5 anti-analysis SEH.
+    /// - `ZwProtectVirtualMemory` + `VirtualProtect` fallback pair —
+    ///   VMP 3.6+ (both APIs present because 3.6 kept `VirtualProtect`
+    ///   as the fallback path).
+    ///
+    /// The classifier's "merged handlers > 200 bytes" tell (3.7+ merged
+    /// handlers, cyber.wtf writeups) is documented here but NOT wired
+    /// in from this entry point — it needs the handler-body length
+    /// distribution which is a `HandlerClassifier` output, not a
+    /// `PEBinary` fact. See the report accompanying commit Q for the
+    /// deferral.
+    pub fn detect_detailed(binary: &PEBinary) -> Result<(VmpVersionDetail, u8)> {
         let sections = binary.get_all_sections().context("Failed to enumerate PE sections")?;
         let has_vmp0 = sections.iter().any(|s| s == ".vmp0");
         let has_vmp1 = sections.iter().any(|s| s == ".vmp1");
@@ -106,6 +160,9 @@ impl VersionDetector {
         let mut vmp30 = RuleScore::default();
         let mut vmp35 = RuleScore::default();
         let mut vmp36 = RuleScore::default();
+        // Sub-version hints (Q — Part B). Each fired marker pushes a
+        // static string; the CLI logs them at info level.
+        let mut sub_hints: Vec<&'static str> = Vec::new();
 
         // --- Section layout rules -----------------------------------
         if layout == SectionLayout::Both {
@@ -207,7 +264,9 @@ impl VersionDetector {
             // to NTDLL!ZwProtectVirtualMemory in the 3.x era. Presence of
             // the Zw* form is a cheap 3.x-vs-2.x discriminator (see
             // RESEARCH_GAPS.md §2.1 and hackyboiz VMP series).
-            if binary.data.windows(22).any(|w| w == b"ZwProtectVirtualMemory") {
+            let has_zw_protect = binary.data.windows(22).any(|w| w == b"ZwProtectVirtualMemory");
+            let has_virtual_protect = binary.data.windows(14).any(|w| w == b"VirtualProtect");
+            if has_zw_protect {
                 vmp30.add(
                     10,
                     RulePriority::Marker,
@@ -223,6 +282,37 @@ impl VersionDetector {
                     RulePriority::Marker,
                     "literal \"ZwProtectVirtualMemory\" (VMP 3.x-era)",
                 );
+            }
+            // Q — Part B: VMP 3.6+ (through 3.10.5) ships BOTH the
+            // Zw* and the legacy VirtualProtect names — the Zw* form
+            // is the fast path, VirtualProtect stays as fallback. The
+            // pair is a stronger 3.6+ signal than the Zw* alone, so
+            // grant an extra bump AND a sub-hint. See cyber.wtf's VMP
+            // series for the API-swap timeline.
+            if has_zw_protect && has_virtual_protect {
+                vmp36.add(
+                    15,
+                    RulePriority::Marker,
+                    "ZwProtectVirtualMemory + VirtualProtect pair (VMP 3.6+)",
+                );
+                sub_hints.push("ZwProtectVirtualMemory + VirtualProtect pair (VMP 3.6+)");
+            }
+
+            // Q — Part B: `LdrLoadDll` literal — VMP 3.8+ DLL-loader
+            // stub uses the NTDLL entrypoint by name. Direct-syscall
+            // trend, first observed in 3.8.x per vxcall's 3.8.1
+            // writeup.
+            if binary.data.windows(10).any(|w| w == b"LdrLoadDll") {
+                vmp36.add(15, RulePriority::Marker, "literal \"LdrLoadDll\" (VMP 3.8+)");
+                sub_hints.push("LdrLoadDll (VMP 3.8+ DLL-loader stub)");
+            }
+
+            // Q — Part B: `RtlAddFunctionTable` literal — VMP 3.10.5
+            // anti-analysis SEH shim. Public writeups tag this as the
+            // 3.10.5-specific tell.
+            if binary.data.windows(19).any(|w| w == b"RtlAddFunctionTable") {
+                vmp36.add(10, RulePriority::Marker, "literal \"RtlAddFunctionTable\" (VMP 3.10.5)");
+                sub_hints.push("RtlAddFunctionTable (VMP 3.10.5 anti-analysis SEH)");
             }
 
             // Anti-VM lookup strings that VMProtect ships in its runtime
@@ -315,7 +405,24 @@ impl VersionDetector {
             );
         }
 
-        Ok((version, confidence))
+        // Only surface sub-hints when the coarse bucket is a 3.x one;
+        // firing "LdrLoadDll (VMP 3.8+)" on a binary the detector
+        // classified as VMP 1.x would confuse the analyst — LdrLoadDll
+        // is a NTDLL export widely used outside VMP too, so its
+        // discriminating value only applies WITHIN the 3.x range.
+        let hints = if matches!(version, VmpVersion::Vmp30 | VmpVersion::Vmp35 | VmpVersion::Vmp36Plus) {
+            sub_hints
+        } else {
+            Vec::new()
+        };
+
+        Ok((
+            VmpVersionDetail {
+                version,
+                sub_hints: hints,
+            },
+            confidence,
+        ))
     }
 
     /// Compute the absolute target VA of a `push imm32; call/jmp rel32` stub.

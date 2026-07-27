@@ -53,7 +53,7 @@ pub use opcode_table::{Handler, OpcodeTable};
 pub use pe_loader::{Bitness, PEBinary};
 pub use protector::{ProtectorDetector, ProtectorFamily, ProtectorReport};
 pub use register_roles::{Register, RegisterRoles};
-pub use version::{VersionDetector, VmpVersion};
+pub use version::{VersionDetector, VmpVersion, VmpVersionDetail};
 pub use xor_key_analyzer::{XorKeyAnalyzer, XorKeyEntry};
 
 /// Main VMP Devirtualizer
@@ -89,7 +89,16 @@ impl VmpDevirtualizer {
     pub fn new_with_hint(binary_path: impl AsRef<Path>, dispatch_rva_hint: Option<u64>) -> Result<Self> {
         let binary = PEBinary::load(binary_path).context("Failed to load PE binary")?;
 
-        let (version, version_confidence) = VersionDetector::detect(&binary).context("Failed to detect VMP version")?;
+        // Q — Part B: use `detect_detailed` so sub-version hints reach
+        // the audit log. `detect` remains part of the public surface
+        // for consumers that only need the coarse bucket, but the
+        // devirtualiser itself never wants to discard the hint list.
+        let (version_detail, version_confidence) =
+            VersionDetector::detect_detailed(&binary).context("Failed to detect VMP version")?;
+        let version = version_detail.version;
+        for hint in &version_detail.sub_hints {
+            log::info!("VMP sub-version hint: {}", hint);
+        }
 
         let mut opcode_table = OpcodeTable::new();
         let mut dispatch_table_va = None;
