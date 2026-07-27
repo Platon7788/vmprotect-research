@@ -139,10 +139,22 @@ fn group_b_adjacent_push_pop_different_reg_is_kept() {
 
 #[test]
 fn group_b_push_pop_with_intervening_use_is_kept() {
-    // push rax; mov rax, [rbx]; pop rax
+    // push rax; mov [rcx], rax; pop rax
+    //
+    // The intervening MOV *stores* rax to memory, so rax is genuinely
+    // consumed between the push and pop — the push/pop preserves the
+    // caller's rax across the store, which is real work. Any of
+    // Groups A-G stripping either half of the pair (or the store)
+    // would change semantics.
+    //
+    // Note: this test used to spell the intervening instruction as
+    // `mov rax, [rbx]` (a load), but Group F (Commit P) correctly
+    // identifies that variant as a dead write killed by the following
+    // pop, so we switched to a store form to keep the "intervening
+    // real use" invariant this test guards.
     let body = [
         0x50, // push rax
-        0x48, 0x8B, 0x03, // mov rax, [rbx]
+        0x48, 0x89, 0x01, // mov [rcx], rax
         0x58, // pop rax
         0xC3,
     ];
@@ -247,25 +259,33 @@ fn group_d_segment_prefix_before_reg_reg_op_is_stripped() {
 }
 
 // -----------------------------------------------------------------
-// Group E — MUST NOT touch.
+// Sanity — real (non-junk) instructions MUST NOT be touched by any
+// of Groups A-D. Named `sanity_*` (not `group_e_*`) because Commit P
+// introduced a genuine Group E for constant-folding pair cancels,
+// tests for which live in the sibling `junk_stripper_folds_tests.rs`.
 // -----------------------------------------------------------------
 
 #[test]
-fn group_e_real_add_with_nonzero_imm_is_kept() {
+fn sanity_real_add_with_nonzero_imm_is_kept() {
     // add rax, 5 — non-zero imm, real effect.
     let body = [0x48, 0x83, 0xC0, 0x05, 0xC3];
     assert_eq!(strip_junk(&body, Bitness::X64), body.to_vec());
 }
 
 #[test]
-fn group_e_real_mov_from_memory_is_kept() {
+fn sanity_real_mov_from_memory_is_kept() {
     // mov rax, [rbx]  =  48 8B 03  -- memory op, keep.
+    //
+    // NB: on the enhanced Commit-P pipeline this is still preserved
+    // because Group F won't strip a lone `mov r, [mem]; ret`: the
+    // ret's live-in is R_ALL, so rax IS live after the load and the
+    // load survives.
     let body = [0x48, 0x8B, 0x03, 0xC3];
     assert_eq!(strip_junk(&body, Bitness::X64), body.to_vec());
 }
 
 #[test]
-fn group_e_lock_prefix_is_kept() {
+fn sanity_lock_prefix_is_kept() {
     // lock or [rbx], rax  =  F0 48 09 03  -- memory barrier, keep entire form.
     let body = [0xF0, 0x48, 0x09, 0x03, 0xC3];
     assert_eq!(strip_junk(&body, Bitness::X64), body.to_vec());
