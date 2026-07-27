@@ -261,13 +261,21 @@ impl VersionDetector {
     }
 
     /// Find the name of the section containing virtual address `va`.
+    ///
+    /// Uses the `min(virtual_size, size_of_raw_data)` clamp that
+    /// [`PEBinary::va_to_offset`] applies, so a bloated `virtual_size`
+    /// (attacker-crafted or benignly padded) cannot claim VAs that are
+    /// not actually mapped to bytes on disk. Without the clamp the
+    /// version detector's "stub lands in .vmpN" rule would fire for a
+    /// target VA that other code paths correctly refuse to read.
     fn section_at_va(binary: &PEBinary, va: u64) -> Option<String> {
         let pe = binary.parse_pe().ok()?;
         let image_base = binary.image_base().ok()?;
 
         for section in &pe.sections {
             let start = image_base.checked_add(section.virtual_address as u64)?;
-            let end = start.checked_add(section.virtual_size as u64)?;
+            let effective_span = (section.virtual_size as u64).min(section.size_of_raw_data as u64);
+            let end = start.checked_add(effective_span)?;
             if va >= start && va < end {
                 return std::str::from_utf8(&section.name[..])
                     .ok()

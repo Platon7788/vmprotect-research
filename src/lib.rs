@@ -298,7 +298,13 @@ fn reconstruct_alu_chains(instructions: &mut [DecodedInstruction], reconstructor
         let chain_len = j - i;
         let chain = vec![op_str.to_string(); chain_len];
 
-        if let Some((_, _, alu_op)) = reconstructor.decompose_chain(&chain) {
+        // Use `match_chain` (not `decompose_chain`) so all chain lengths
+        // registered in `ALUReconstructor::patterns` — including the
+        // single-NOR -> Not entry — resolve. `decompose_chain` gates on
+        // `len >= 2` to keep its two-operand return type meaningful, but
+        // we only need the ALUOp here; operand names live on the chain
+        // handlers themselves.
+        if let Some(alu_op) = reconstructor.match_chain(&chain) {
             let last_idx = j - 1;
             log::debug!(
                 "Reconstructed {}x {} at 0x{:x} -> {:?}",
@@ -414,6 +420,27 @@ mod tests {
         reconstruct_alu_chains(&mut instructions, &reconstructor);
 
         assert!(instructions.iter().all(|i| i.alu_op.is_none()));
+    }
+
+    /// Regression: `ALUReconstructor::patterns` registers a single-`NOR`
+    /// entry -> `Not`, but the earlier implementation routed chains through
+    /// `decompose_chain`, which gates on `chain.len() >= 2` and returned
+    /// `None` here — so a lone `NOR_CHAIN` handler between non-chain
+    /// handlers was silently dropped from the reconstructed semantics.
+    #[test]
+    fn reconstruct_alu_chains_stamps_lone_nor_as_not() {
+        let reconstructor = ALUReconstructor::new();
+        let mut instructions = vec![
+            make_instr(0x1000, "PUSH_REG"),
+            make_instr(0x1001, "NOR_CHAIN"),
+            make_instr(0x1002, "PUSH_REG"),
+        ];
+
+        reconstruct_alu_chains(&mut instructions, &reconstructor);
+
+        assert_eq!(instructions[0].alu_op, None);
+        assert_eq!(instructions[1].alu_op, Some(ALUOp::Not));
+        assert_eq!(instructions[2].alu_op, None);
     }
 
     #[test]

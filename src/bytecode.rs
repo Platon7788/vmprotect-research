@@ -80,9 +80,14 @@ impl Bytecode {
                 operands.push(self.vip);
             }
             H_JMP => {
-                // Jump target
-                let offset = self.read_imm(1, 4, cryptor)?;
-                operands.push((self.vip as i64 + offset as i64) as u64);
+                // Jump target. `read_imm` returns the 4-byte immediate zero-
+                // extended in a u64, so a negative rel32 (e.g. 0xFFFFFF00)
+                // would land at +4_294_967_040 instead of -256 if fed
+                // straight into i64 arithmetic. Cast through i32 to preserve
+                // the sign for backward jumps.
+                let raw = self.read_imm(1, 4, cryptor)?;
+                let offset = raw as u32 as i32;
+                operands.push((self.vip as i64).wrapping_add(offset as i64) as u64);
             }
             H_RET => {
                 // No operands
@@ -104,6 +109,14 @@ impl Bytecode {
     /// matching VMP's stream-cipher-like behavior where each decrypted byte
     /// feeds the state used to decrypt the next one.
     fn read_imm(&self, offset: usize, size: usize, cryptor: &mut OpcodeCryptor) -> Result<u64> {
+        // Cap at u64's width: the assembly loop below shifts by `i * 8`, so
+        // `size == 9` would compute `(byte as u64) << 64` — an overflow that
+        // panics in debug and is undefined behaviour in release. VMP operands
+        // are 1/2/4/8 bytes; anything larger is a bogus handler table.
+        if size > 8 {
+            anyhow::bail!("read_imm size {} exceeds u64 width (max 8)", size);
+        }
+
         let bytes = self
             .data
             .get(offset..offset + size)
@@ -293,5 +306,58 @@ mod tests {
         bytecode.decode_operands(&handler, &mut cryptor).unwrap();
 
         assert_ne!(cryptor.get_crc(), crc_before);
+    }
+
+    /// A negative rel32 (0xFFFFFF00 = -256) must decode as a backward jump
+    /// (`vip - 256`), not the ~4 GB forward jump you'd get from a
+    /// zero-extended `u32 -> i64` cast. Regression test for the bug the
+    /// audit surfaced in `decode_operands`'s H_JMP arm.
+    #[test]
+    fn jmp_negative_rel32_produces_backward_target() {
+        // Encrypted-byte-then-cryptor-invariance trick: feeding zero bytes
+        // with an initial CRC of zero decrypts to zeros AND leaves the CRC
+        // at zero (31*0 + 0 = 0), so a trailing 0xFF byte still XORs
+        // against mask=0 and lands intact. The assembled little-endian
+        // rel32 becomes 0xFF00_0000 -> i32 = -0x0100_0000. Without sign-
+        // extension the H_JMP arm would treat this as +0xFF00_0000 and
+        // produce vip + 4_278_190_080 instead of vip - 16_777_216.
+        let vip: u64 = 0x140002000;
+        let bytecode = Bytecode {
+            data: vec![0x11, 0x00, 0x00, 0x00, 0xFF],
+            vip,
+        };
+        let handler = make_handler(H_JMP, None);
+
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0);
+        let operands = bytecode.decode_operands(&handler, &mut cryptor).unwrap();
+
+        assert_eq!(operands.len(), 1);
+        assert_eq!(operands[0], vip.wrapping_sub(0x0100_0000));
+        assert!(operands[0] < vip, "backward jump must land before vip");
+    }
+
+    /// `read_imm` must refuse `size > 8` (the u64 width) instead of shift-
+    /// overflow-panicking on the last iteration of its assembly loop.
+    #[test]
+    fn read_imm_rejects_size_beyond_u64_width() {
+        // A crafted handler table (via `--export-opcodes` round-trip or
+        // malformed JSON) could set size_bytes to 10; operand count then
+        // becomes 9, which used to compute `(byte as u64) << 64` and panic
+        // in debug builds.
+        let bytecode = Bytecode {
+            data: vec![0x11; 32],
+            vip: 0x140001000,
+        };
+        let handler = make_handler(H_PUSH_VALUE, Some(10));
+
+        let mut cryptor = OpcodeCryptor::new();
+        let err = bytecode
+            .decode_operands(&handler, &mut cryptor)
+            .expect_err("size 9 must error, not panic");
+        assert!(
+            err.to_string().contains("exceeds u64 width"),
+            "unexpected error message: {err}"
+        );
     }
 }

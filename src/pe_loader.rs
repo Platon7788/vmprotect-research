@@ -207,10 +207,19 @@ impl PEBinary {
             .context("Entry point VA overflow")
     }
 
-    /// Read `count` bytes starting at the PE entry point (AddressOfEntryPoint).
+    /// Read up to `count` bytes starting at the PE entry point
+    /// (`AddressOfEntryPoint`), returning as many bytes as remain in the
+    /// containing section (never more than `count`).
+    ///
+    /// Uses [`Self::read_bytes_up_to`] rather than the strict
+    /// [`Self::read_bytes`] so an entry-code section shorter than `count`
+    /// (e.g. a small thunk near the end of `.text`) still yields the
+    /// available prefix. The strict variant would return `Err` and cause
+    /// every entry-stub heuristic in the version detector to be silently
+    /// skipped for otherwise-legitimate samples.
     pub fn entry_point_bytes(&self, count: usize) -> Result<Vec<u8>> {
         let entry_va = self.entry_point_va()?;
-        self.read_bytes(entry_va, count)
+        self.read_bytes_up_to(entry_va, count)
     }
 
     /// Get the raw `Characteristics` flags (IMAGE_SCN_*) for a named section.

@@ -83,9 +83,15 @@ impl DispatchTableLocator {
         let mut potential_tables = Vec::new();
 
         // Scan for sequences of valid code pointers
-        // Try both 4-byte and 8-byte entries
+        // Try both 4-byte and 8-byte entries.
+        //
+        // Inclusive upper bound: a section whose length is *exactly*
+        // `256 * entry_size` still fits a dispatch table at offset 0,
+        // so `..=len-256*entry_size` must be used, not the exclusive
+        // `..len-256*entry_size` which would empty-iterate.
         for entry_size in &[4, 8] {
-            for i in 0..section_data.len().saturating_sub(256 * entry_size) {
+            let max_start = section_data.len().saturating_sub(256 * entry_size);
+            for i in 0..=max_start {
                 let mut valid_count = 0;
 
                 // Check if next 256 entries look like valid addresses
@@ -483,5 +489,23 @@ mod tests {
         let bad_hint = 0x0090_0000u64; // does not validate, and outside the image
         let result = DispatchTableLocator::locate(&binary, Some(bad_hint));
         assert!(result.is_err());
+    }
+
+    /// Regression: a section whose length is *exactly* `256 * entry_size`
+    /// (2048 bytes for x64) was previously ignored by `find_dispatch_pattern`
+    /// because the outer scan used an exclusive `..len - 256*entry_size`
+    /// bound, giving an empty `0..0` range and skipping offset 0.
+    #[test]
+    fn find_dispatch_pattern_accepts_exact_size_section() {
+        let image_base = 0x1_4000_0000u64;
+        let entries = make_entries(image_base, 256, 8);
+        assert_eq!(entries.len(), 256 * 8);
+        // Build a binary just to satisfy the image_base lookup; section
+        // name is irrelevant since we call find_dispatch_pattern directly.
+        let binary = build_minimal_pe(image_base, 0x1000, &entries);
+
+        let va = DispatchTableLocator::find_dispatch_pattern(&entries, &binary, ".test")
+            .expect("exact-size table must be located");
+        assert_eq!(va, image_base + 0x1000);
     }
 }

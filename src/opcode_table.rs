@@ -54,14 +54,23 @@ impl OpcodeTable {
         self.table.is_empty()
     }
 
-    /// Load from JSON file
+    /// Load from JSON file.
+    ///
+    /// Accepts opcode_byte values either as `"0xNN"` (with prefix) or bare
+    /// `"NN"` hex. A missing/short/malformed string produces a clear error
+    /// via [`crate::parse_hex_rva`] rather than panicking on slice bounds.
     pub fn from_json(path: &str) -> anyhow::Result<Self> {
+        use anyhow::Context;
+
         let data = std::fs::read_to_string(path)?;
         let entries: Vec<TraceEntry> = serde_json::from_str(&data)?;
 
         let mut table = OpcodeTable::new();
         for entry in entries {
-            let opcode = u8::from_str_radix(&entry.opcode_byte[2..], 16)?;
+            let opcode_u64 = crate::parse_hex_rva(&entry.opcode_byte)
+                .with_context(|| format!("Invalid opcode_byte in JSON: {:?}", entry.opcode_byte))?;
+            let opcode =
+                u8::try_from(opcode_u64).with_context(|| format!("opcode_byte out of u8 range: 0x{:x}", opcode_u64))?;
             table.register(
                 opcode,
                 Handler {
@@ -127,5 +136,33 @@ mod tests {
         assert_eq!(table.len(), 1);
         assert!(table.lookup(0x11).is_some());
         assert!(table.lookup(0x22).is_none());
+    }
+
+    /// Regression: `from_json` used to slice `opcode_byte[2..]`
+    /// unconditionally, panicking with `byte index 2 out of bounds`
+    /// on any string shorter than two characters. It must now return
+    /// `Err`, so a caller of the public loader can recover.
+    #[test]
+    fn from_json_short_opcode_byte_errors_instead_of_panicking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, r#"[{"opcode_byte":"","handler":"X","size_bytes":1}]"#).unwrap();
+
+        let result = OpcodeTable::from_json(path.to_str().unwrap());
+        assert!(result.is_err(), "empty opcode_byte must not panic");
+    }
+
+    /// `from_json` should accept bare hex (no `0x` prefix) — this used to
+    /// silently succeed only for well-formed prefixed strings and slice-
+    /// panic for anything unusual.
+    #[test]
+    fn from_json_accepts_bare_hex_opcode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bare.json");
+        std::fs::write(&path, r#"[{"opcode_byte":"1a","handler":"X","size_bytes":2}]"#).unwrap();
+
+        let table = OpcodeTable::from_json(path.to_str().unwrap()).expect("bare hex must parse");
+        assert_eq!(table.len(), 1);
+        assert!(table.lookup(0x1a).is_some());
     }
 }
