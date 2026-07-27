@@ -292,9 +292,24 @@ impl HandlerClassifier {
 mod tests {
     use super::*;
 
+    /// Classify a synthetic handler body inside a real minimal PE so the
+    /// full `classify` path (read_bytes_up_to + analyze_bytecode +
+    /// SemanticMatcher) is exercised end-to-end. Replaces the empty stub.
     #[test]
-    fn test_handler_classifier() {
-        // Stub: requires a real PE fixture. See AUDIT_REPORT.md Q13.
+    fn classify_pop_shape_body_in_real_pe_yields_pop_semantic() {
+        use crate::pe_loader::test_util::build_minimal_pe;
+        // MOV rax,[r14]; ADD r14,8; MOV [rbp+8],rax; JMP [rip]
+        let handler_body = [
+            0x49, 0x8B, 0x06, 0x49, 0x83, 0xC6, 0x08, 0x48, 0x89, 0x45, 0x08, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let image_base = 0x1_4000_0000u64;
+        let section_rva = 0x1000u32;
+        let binary = build_minimal_pe(true, image_base, section_rva, &handler_body);
+        let handler_va = image_base + section_rva as u64;
+
+        let classification = HandlerClassifier::classify(&binary, handler_va).expect("classify");
+        assert_eq!(classification.vmp_semantic, Some(VmpSemantic::Pop));
+        assert!(!classification.handler_type.is_empty());
     }
 
     #[test]

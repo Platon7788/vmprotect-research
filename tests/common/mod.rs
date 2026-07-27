@@ -7,9 +7,14 @@ use tempfile::NamedTempFile;
 /// section, then write it to a temporary file on disk so `assert_cmd`
 /// can hand its path to the `vmp_devirt` binary.
 ///
-/// Mirrors `src/pe_loader.rs::tests::build_minimal_pe` — kept in sync
-/// but duplicated because integration tests cannot reach `#[cfg(test)]`
-/// helpers in the library crate.
+/// This is the integration-test twin of
+/// `src/pe_loader.rs::test_util::build_minimal_pe`. Integration tests
+/// live in their own compilation unit that links the crate without
+/// `#[cfg(test)]`, so they cannot reach that helper — hence this
+/// duplicate. The lib copy is the AUTHORITATIVE source of the PE
+/// layout; if you fix a header field or add a data directory there,
+/// mirror the change here or PE-shape divergence will silently mask
+/// regressions across the test/integration boundary.
 ///
 /// The generated image:
 ///   - is 64-bit (Machine = 0x8664, magic = 0x20B),

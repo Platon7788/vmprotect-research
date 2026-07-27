@@ -34,7 +34,13 @@ pub mod xor_key_analyzer;
 pub use alu::{ALUOp, ALUReconstructor};
 pub use bytecode::Bytecode;
 pub use decrypt::OpcodeCryptor;
-pub use dispatch_extractor_py::{DispatchEntry, DispatchExtractorPy};
+// Deliberately NOT re-exported at the crate root:
+//   - dispatch_extractor_py::{DispatchEntry, DispatchExtractorPy}
+// The Python-subprocess extractor is an internal orchestration seam
+// scheduled for elimination (AUDIT_REPORT.md Q15). Reaching it via the
+// long path `vmp_devirt::dispatch_extractor_py::*` keeps the future
+// pure-Rust replacement from being a semver break for any external
+// consumer who happened to grab the type off the crate root.
 pub use dispatch_table::DispatchTableLocator;
 pub use handler_classifier::{HandlerClassification, HandlerClassifier};
 pub use handler_semantic::{SemanticMatcher, VmpSemantic};
@@ -167,6 +173,25 @@ impl VmpDevirtualizer {
         self.version_confidence
     }
 
+    /// Returns `false` when the loaded binary shows no signs of being a
+    /// VMP-protected image: the version detector landed on `Unknown` with
+    /// confidence below the 40-point threshold, AND no dispatch table
+    /// was located.
+    ///
+    /// This is the library-side spelling of the F2 non-VMP gate the CLI
+    /// applies before running `devirtualize_range`. Any wrapper —
+    /// batch harness, GUI, fuzzer — should reuse this instead of
+    /// re-implementing the predicate against public accessors, so the
+    /// tunable confidence threshold only lives here.
+    ///
+    /// A `--force-version` override bumps `version()` off `Unknown` and
+    /// therefore flips this to `true`; a `--dispatch-rva` hint that
+    /// validates gives `dispatch_table_va()` a value and does the same.
+    /// Both bypasses are intentional research escape hatches.
+    pub fn looks_like_vmp(&self) -> bool {
+        !(self.version == VmpVersion::Unknown && self.version_confidence < 40 && self.dispatch_table_va.is_none())
+    }
+
     /// Get PE binary reference
     pub fn binary(&self) -> &PEBinary {
         &self.binary
@@ -259,64 +284,9 @@ impl VmpDevirtualizer {
             }
         }
 
-        reconstruct_alu_chains(&mut instructions, &self.alu_reconstructor);
+        alu::reconstruct_alu_chains(&mut instructions, &self.alu_reconstructor);
 
         Ok(instructions)
-    }
-}
-
-/// Scan decoded instructions for consecutive NOR_CHAIN / NAND_CHAIN runs and
-/// stamp the reconstructed `ALUOp` onto the last instruction of each run.
-///
-/// Extracted as a free function (rather than a `VmpDevirtualizer` method) so
-/// it can be unit tested directly on synthetic `DecodedInstruction` slices,
-/// without needing a real PE fixture to build a full devirtualizer (see
-/// AUDIT_REPORT.md Q13 — no such fixture exists yet).
-///
-/// Runs are grouped by identical handler name, so a run is always
-/// homogeneous (all `"NOR_CHAIN"` or all `"NAND_CHAIN"`); `ALUReconstructor`
-/// only recognizes homogeneous chains (see its `patterns` table), so mixed
-/// runs are never produced here.
-fn reconstruct_alu_chains(instructions: &mut [DecodedInstruction], reconstructor: &ALUReconstructor) {
-    let mut i = 0;
-    while i < instructions.len() {
-        let handler_name = instructions[i].handler.name.clone();
-        let op_str = match handler_name.as_str() {
-            "NOR_CHAIN" => "NOR",
-            "NAND_CHAIN" => "NAND",
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-
-        let mut j = i + 1;
-        while j < instructions.len() && instructions[j].handler.name == handler_name {
-            j += 1;
-        }
-
-        let chain_len = j - i;
-        let chain = vec![op_str.to_string(); chain_len];
-
-        // Use `match_chain` (not `decompose_chain`) so all chain lengths
-        // registered in `ALUReconstructor::patterns` — including the
-        // single-NOR -> Not entry — resolve. `decompose_chain` gates on
-        // `len >= 2` to keep its two-operand return type meaningful, but
-        // we only need the ALUOp here; operand names live on the chain
-        // handlers themselves.
-        if let Some(alu_op) = reconstructor.match_chain(&chain) {
-            let last_idx = j - 1;
-            log::debug!(
-                "Reconstructed {}x {} at 0x{:x} -> {:?}",
-                chain_len,
-                op_str,
-                instructions[last_idx].vip,
-                alu_op
-            );
-            instructions[last_idx].alu_op = Some(alu_op);
-        }
-
-        i = j;
     }
 }
 
@@ -352,9 +322,18 @@ pub struct DecodedInstruction {
 mod tests {
     use super::*;
 
+    /// Version detection on a minimal PE with no VMP markers must land
+    /// on `Unknown` with low confidence — this pins the detector's
+    /// "nothing here" behaviour, which is what F2's non-VMP-exit gate
+    /// keys on. Replaces the empty stub whose comment referenced
+    /// AUDIT_REPORT.md Q13 (now closed by `pe_loader::test_util`).
     #[test]
-    fn test_version_detection() {
-        // Stub: requires a real PE fixture. See AUDIT_REPORT.md Q13.
+    fn version_detection_returns_unknown_for_bare_pe() {
+        use crate::pe_loader::test_util::build_minimal_pe;
+        let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0x90u8; 32]);
+        let (version, confidence) = VersionDetector::detect(&binary).expect("detect must not error");
+        assert_eq!(version, VmpVersion::Unknown);
+        assert!(confidence < 40, "bare PE must be below the VMP threshold");
     }
 
     #[test]
@@ -377,90 +356,5 @@ mod tests {
         assert!(parse_hex_rva("not-hex").is_err());
         assert!(parse_hex_rva("0xzz").is_err());
         assert!(parse_hex_rva("").is_err());
-    }
-
-    fn make_instr(vip: u64, handler_name: &str) -> DecodedInstruction {
-        DecodedInstruction {
-            vip,
-            opcode: 0,
-            handler: Handler {
-                name: handler_name.to_string(),
-                opcode: 0,
-                size_bytes: None,
-            },
-            operands: Vec::new(),
-            size: 1,
-            alu_op: None,
-        }
-    }
-
-    #[test]
-    fn reconstruct_alu_chains_stamps_last_instruction_of_nor_run() {
-        let reconstructor = ALUReconstructor::new();
-        let mut instructions = vec![
-            make_instr(0x1000, "NOR_CHAIN"),
-            make_instr(0x1001, "NOR_CHAIN"),
-            make_instr(0x1002, "NOR_CHAIN"),
-            make_instr(0x1003, "NOR_CHAIN"),
-        ];
-
-        reconstruct_alu_chains(&mut instructions, &reconstructor);
-
-        assert_eq!(instructions[0].alu_op, None);
-        assert_eq!(instructions[1].alu_op, None);
-        assert_eq!(instructions[2].alu_op, None);
-        assert_eq!(instructions[3].alu_op, Some(ALUOp::Add));
-    }
-
-    #[test]
-    fn reconstruct_alu_chains_ignores_non_chain_handlers() {
-        let reconstructor = ALUReconstructor::new();
-        let mut instructions = vec![make_instr(0x1000, "PUSH_REG"), make_instr(0x1001, "RET")];
-
-        reconstruct_alu_chains(&mut instructions, &reconstructor);
-
-        assert!(instructions.iter().all(|i| i.alu_op.is_none()));
-    }
-
-    /// Regression: `ALUReconstructor::patterns` registers a single-`NOR`
-    /// entry -> `Not`, but the earlier implementation routed chains through
-    /// `decompose_chain`, which gates on `chain.len() >= 2` and returned
-    /// `None` here — so a lone `NOR_CHAIN` handler between non-chain
-    /// handlers was silently dropped from the reconstructed semantics.
-    #[test]
-    fn reconstruct_alu_chains_stamps_lone_nor_as_not() {
-        let reconstructor = ALUReconstructor::new();
-        let mut instructions = vec![
-            make_instr(0x1000, "PUSH_REG"),
-            make_instr(0x1001, "NOR_CHAIN"),
-            make_instr(0x1002, "PUSH_REG"),
-        ];
-
-        reconstruct_alu_chains(&mut instructions, &reconstructor);
-
-        assert_eq!(instructions[0].alu_op, None);
-        assert_eq!(instructions[1].alu_op, Some(ALUOp::Not));
-        assert_eq!(instructions[2].alu_op, None);
-    }
-
-    #[test]
-    fn reconstruct_alu_chains_handles_separate_runs_independently() {
-        let reconstructor = ALUReconstructor::new();
-        let mut instructions = vec![
-            make_instr(0x1000, "NAND_CHAIN"),
-            make_instr(0x1001, "NAND_CHAIN"),
-            make_instr(0x1002, "PUSH_REG"),
-            make_instr(0x1003, "NOR_CHAIN"),
-            make_instr(0x1004, "NOR_CHAIN"),
-            make_instr(0x1005, "NOR_CHAIN"),
-            make_instr(0x1006, "NOR_CHAIN"),
-        ];
-
-        reconstruct_alu_chains(&mut instructions, &reconstructor);
-
-        assert_eq!(instructions[0].alu_op, None);
-        assert_eq!(instructions[1].alu_op, Some(ALUOp::And));
-        assert_eq!(instructions[2].alu_op, None);
-        assert_eq!(instructions[6].alu_op, Some(ALUOp::Add));
     }
 }

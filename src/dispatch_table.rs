@@ -2,7 +2,8 @@
 //!
 //! Finds and extracts VMP dispatch table from binary.
 
-use crate::{DispatchExtractorPy, PEBinary, XorKeyAnalyzer};
+use crate::dispatch_extractor_py::DispatchExtractorPy;
+use crate::{PEBinary, XorKeyAnalyzer};
 use anyhow::Result;
 
 /// Dispatch table locator
@@ -314,103 +315,16 @@ impl DispatchTableLocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pe_loader::test_util::build_minimal_pe as build_minimal_pe_generic;
 
-    /// Build a minimal, valid PE32+ image in memory with a single section
-    /// so `looks_like_dispatch_table` / `locate` can be exercised without a
-    /// real VMP sample. `section_rva` is where the section is mapped and
-    /// `section_data` becomes its raw (and virtual) content.
+    /// Thin PE32+ wrapper over the shared `pe_loader::test_util::build_minimal_pe`
+    /// helper — kept as a local shim so the existing tests below read the
+    /// same as before (they all want x64, so `is_64 = true` is baked in
+    /// here). The former ~90-line duplicate PE generator lived here as
+    /// its own copy; that copy is gone in favour of the single source of
+    /// truth in `pe_loader::test_util`.
     fn build_minimal_pe(image_base: u64, section_rva: u32, section_data: &[u8]) -> PEBinary {
-        const FILE_ALIGN: u32 = 0x200;
-        const HEADERS_SIZE: u32 = 0x200;
-
-        let mut raw = section_data.to_vec();
-        while !raw.len().is_multiple_of(FILE_ALIGN as usize) {
-            raw.push(0);
-        }
-
-        let mut buf = vec![0u8; HEADERS_SIZE as usize];
-
-        // DOS header
-        buf[0] = b'M';
-        buf[1] = b'Z';
-        let e_lfanew: u32 = 0x40;
-        buf[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
-
-        let mut off = e_lfanew as usize;
-        buf[off..off + 4].copy_from_slice(b"PE\0\0");
-        off += 4;
-
-        // COFF header
-        buf[off..off + 2].copy_from_slice(&0x8664u16.to_le_bytes()); // Machine: AMD64
-        off += 2;
-        buf[off..off + 2].copy_from_slice(&1u16.to_le_bytes()); // NumberOfSections
-        off += 2;
-        off += 4; // TimeDateStamp
-        off += 4; // PointerToSymbolTable
-        off += 4; // NumberOfSymbols
-        buf[off..off + 2].copy_from_slice(&0xF0u16.to_le_bytes()); // SizeOfOptionalHeader
-        off += 2;
-        buf[off..off + 2].copy_from_slice(&0x0022u16.to_le_bytes()); // Characteristics
-        off += 2;
-
-        // Optional header (PE32+), standard fields
-        buf[off..off + 2].copy_from_slice(&0x020Bu16.to_le_bytes()); // Magic
-        off += 2;
-        off += 1 + 1; // Major/MinorLinkerVersion
-        off += 4; // SizeOfCode
-        off += 4; // SizeOfInitializedData
-        off += 4; // SizeOfUninitializedData
-        buf[off..off + 4].copy_from_slice(&0x1000u32.to_le_bytes()); // AddressOfEntryPoint
-        off += 4;
-        off += 4; // BaseOfCode
-
-        // Optional header, windows-specific fields
-        buf[off..off + 8].copy_from_slice(&image_base.to_le_bytes()); // ImageBase
-        off += 8;
-        buf[off..off + 4].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
-        off += 4;
-        buf[off..off + 4].copy_from_slice(&FILE_ALIGN.to_le_bytes()); // FileAlignment
-        off += 4;
-        off += 2 + 2 + 2 + 2 + 2 + 2; // OS/Image/Subsystem versions
-        off += 4; // Win32VersionValue
-        let size_of_image = section_rva + raw.len() as u32 + 0x1000;
-        buf[off..off + 4].copy_from_slice(&size_of_image.to_le_bytes()); // SizeOfImage
-        off += 4;
-        buf[off..off + 4].copy_from_slice(&HEADERS_SIZE.to_le_bytes()); // SizeOfHeaders
-        off += 4;
-        off += 4; // CheckSum
-        buf[off..off + 2].copy_from_slice(&2u16.to_le_bytes()); // Subsystem
-        off += 2;
-        off += 2; // DllCharacteristics
-        off += 8 + 8 + 8 + 8; // Stack/Heap reserve+commit
-        off += 4; // LoaderFlags
-        buf[off..off + 4].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
-        off += 4;
-        off += 16 * 8; // Data directories (all zero)
-
-        // Section header
-        let name = b".test\0\0\0";
-        buf[off..off + 8].copy_from_slice(name);
-        off += 8;
-        buf[off..off + 4].copy_from_slice(&(raw.len() as u32).to_le_bytes()); // VirtualSize
-        off += 4;
-        buf[off..off + 4].copy_from_slice(&section_rva.to_le_bytes()); // VirtualAddress
-        off += 4;
-        buf[off..off + 4].copy_from_slice(&(raw.len() as u32).to_le_bytes()); // SizeOfRawData
-        off += 4;
-        buf[off..off + 4].copy_from_slice(&HEADERS_SIZE.to_le_bytes()); // PointerToRawData
-        off += 4;
-        off += 4 + 4 + 2 + 2; // Relocations/Linenumbers pointers+counts
-        buf[off..off + 4].copy_from_slice(&0xC0000040u32.to_le_bytes()); // Characteristics
-        off += 4;
-        let _ = off;
-
-        buf.extend_from_slice(&raw);
-
-        PEBinary {
-            path: "<test-fixture>".to_string(),
-            data: buf,
-        }
+        build_minimal_pe_generic(true, image_base, section_rva, section_data)
     }
 
     /// Build 256 pointer-sized entries; the first `valid_count` decode into

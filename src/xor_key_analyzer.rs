@@ -35,30 +35,17 @@ struct XorPattern {
     sign_extend: bool,
 }
 
-/// Unicorn-based key extractor (static analysis version).
+/// Static-analysis XOR-key extractor for the VMP dispatch table.
 ///
-/// Fields kept for API compatibility with the instance-based flow (see `new`);
-/// current production path uses associated (static) functions.
-#[allow(dead_code)]
-pub struct XorKeyAnalyzer {
-    /// Captured XOR keys
-    keys: Vec<XorKeyEntry>,
-    /// Dispatch table VA
-    dispatch_table_va: u64,
-    /// Image base
-    image_base: u64,
-}
+/// Marker type: this module never held instance state — every operation
+/// is an associated (static) function on this struct. An earlier
+/// instance-based facade with `new()` / `keys` / `dispatch_table_va` /
+/// `image_base` fields was dead code (only the test asserted round-
+/// tripping fields it just stored), so it was removed rather than
+/// kept as an aspirational half-abstraction.
+pub struct XorKeyAnalyzer;
 
 impl XorKeyAnalyzer {
-    /// Create new key extractor
-    pub fn new(dispatch_table_va: u64, image_base: u64) -> Self {
-        XorKeyAnalyzer {
-            keys: Vec::new(),
-            dispatch_table_va,
-            image_base,
-        }
-    }
-
     /// Extract XOR keys from dispatch table using pattern analysis
     ///
     /// Strategy:
@@ -355,13 +342,6 @@ pub struct KeyStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_emulator_creation() {
-        let emulator = XorKeyAnalyzer::new(0x48138, 0x400000);
-        assert_eq!(emulator.dispatch_table_va, 0x48138);
-        assert_eq!(emulator.image_base, 0x400000);
-    }
 
     #[test]
     fn test_opcode_key_derivation() {

@@ -166,10 +166,8 @@ fn main() -> anyhow::Result<ExitCode> {
     // and provides no dispatch table. --force-version defeats the version
     // check; --dispatch-rva defeats the dispatch-table check. Both together
     // are the intended escape hatch for researchers analyzing edge cases.
-    let devirt_would_be_meaningless = devirt.version() == VmpVersion::Unknown
-        && devirt.version_confidence() < 40
-        && devirt.dispatch_table_va().is_none();
-    if devirt_would_be_meaningless {
+    // The predicate itself lives on VmpDevirtualizer so wrappers can reuse it.
+    if !devirt.looks_like_vmp() {
         eprintln!(
             "error: {} does not appear to be a VMP-protected binary.",
             args.binary.display()

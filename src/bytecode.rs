@@ -5,7 +5,11 @@
 use crate::{Handler, OpcodeCryptor, PEBinary};
 use anyhow::{Context, Result};
 
-// Handler name constants, shared between operand decoding and size computation.
+// Handler name constants, shared between operand decoding, size
+// computation, and ALU-chain reconstruction. `NOR_CHAIN` / `NAND_CHAIN`
+// are `pub(crate)` because `alu::reconstruct_alu_chains` scans for
+// exactly these names — keeping the literal strings on one side and
+// the ALU-side scanner in step avoids the drift the audit called out.
 const H_PUSH_REG: &str = "PUSH_REG";
 const H_PUSH_VALUE: &str = "PUSH_VALUE";
 const H_POP_MEMORY: &str = "POP_MEMORY";
@@ -14,8 +18,8 @@ const H_SUB_REG: &str = "SUB_REG";
 const H_XOR_REG: &str = "XOR_REG";
 const H_OR_REG: &str = "OR_REG";
 const H_AND_REG: &str = "AND_REG";
-const H_NOR_CHAIN: &str = "NOR_CHAIN";
-const H_NAND_CHAIN: &str = "NAND_CHAIN";
+pub(crate) const H_NOR_CHAIN: &str = "NOR_CHAIN";
+pub(crate) const H_NAND_CHAIN: &str = "NAND_CHAIN";
 const H_JMP: &str = "JMP";
 const H_RET: &str = "RET";
 

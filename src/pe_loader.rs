@@ -240,14 +240,23 @@ impl PEBinary {
     }
 }
 
+/// Shared minimal-PE fixture builder for lib-side tests.
+///
+/// Single authoritative source for the ~110-line PE32/PE32+ generator
+/// previously duplicated in `dispatch_table.rs::tests` and, in a
+/// slightly different form, in `tests/common/mod.rs`. The integration-
+/// test copy in `tests/common/mod.rs` cannot import from here (it links
+/// the crate without `#[cfg(test)]`), so it stays as a documented
+/// twin — see the comment at the top of that file.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_util {
+    use super::PEBinary;
 
     /// Build a minimal, valid PE image (PE32 when `is_64` is false, PE32+
-    /// otherwise) in memory with a single section, so `bitness`/`image_base`/
-    /// `read_bytes_up_to` can be exercised without a real sample on disk.
-    fn build_minimal_pe(is_64: bool, image_base: u64, section_rva: u32, section_data: &[u8]) -> PEBinary {
+    /// otherwise) in memory with a single `.test` section, so
+    /// `bitness`/`image_base`/`read_bytes_up_to` can be exercised without
+    /// a real sample on disk.
+    pub fn build_minimal_pe(is_64: bool, image_base: u64, section_rva: u32, section_data: &[u8]) -> PEBinary {
         const FILE_ALIGN: u32 = 0x200;
         const HEADERS_SIZE: u32 = 0x200;
 
@@ -360,10 +369,28 @@ mod tests {
             data: buf,
         }
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::test_util::build_minimal_pe;
+    use super::*;
+
+    /// A minimal in-memory PE loads via `PEBinary::load` without panicking
+    /// or hitting the "no optional header" path. Replaces the earlier
+    /// empty stub whose `// Stub: requires a real PE fixture` comment is
+    /// no longer accurate — `build_minimal_pe` provides one.
     #[test]
-    fn test_pe_load() {
-        // Stub: requires a real PE fixture. See AUDIT_REPORT.md Q13.
+    fn test_pe_load_roundtrips_via_load() {
+        use std::io::Write;
+
+        let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0xAAu8; 16]);
+        let mut file = tempfile::NamedTempFile::new().expect("tempfile");
+        file.write_all(&binary.data).expect("write");
+
+        let loaded = PEBinary::load(file.path()).expect("load succeeds");
+        assert_eq!(loaded.image_base().unwrap(), 0x1_4000_0000);
+        assert_eq!(loaded.bitness().unwrap(), Bitness::X64);
     }
 
     #[test]
