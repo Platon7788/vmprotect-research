@@ -30,8 +30,44 @@
 //! (single-instruction opcodes, then multi-op logic pairs, then
 //! Add before the Push family) and puts the two catch-all shapes
 //! (`Popf`, `Vsetvsp`) last so a stronger fingerprint always wins.
+//!
+//! Commit L extends this ordering (see `handler_semantic_ext.rs` for
+//! the added matcher bodies):
+//!
+//! - `VpushCr0` / `VpushCr3` (distinctive 3-byte `0F 20` opcode) slot
+//!   in right after `Cpuid`, alongside the other single-fingerprint
+//!   system opcodes.
+//! - `Lockor` (LOCK-prefixed OR) runs right after `Vmexit`.
+//! - `Mul` / `Imul` / `Div` / `Idiv` (`0xF7 /n`) run after `Nand`/`Nor`
+//!   but before `Add` -- they're a disjoint `/n` range from `Nand`/
+//!   `Nor`'s `NOT` (`/2`) but conceptually belong to the arithmetic
+//!   family `Add` heads.
+//! - `Shl` / `Shr` / `Shld` / `Shrd` / `Rcl` / `Rcr` run right after
+//!   `Add` -- same flag-touching arithmetic tier, PUSHFQ-gated.
+//! - `Vnop` runs right before `Vsetvsp`: it is the strictly-narrower
+//!   sibling (no load at all, vs. `Vsetvsp`'s single load-indirect),
+//!   so it must be tried first or `Vsetvsp` would never lose to it.
+//!
+//! `Vemit` / `Vexec` are intentionally NOT implemented -- see
+//! `handler_semantic_ext.rs` module doc for why the stateless-matcher
+//! signal is too weak to distinguish them from `Vjmp` / a nested-VM
+//! `Ldd`. `Popfd` (x86) vs `Popfq` (x64) are folded into the single
+//! `Popf` variant -- both are byte-identical (`0x9D`); the bitness
+//! parameter already threads through `classify()` if a future commit
+//! wants to split them.
 
 use crate::Bitness;
+
+#[path = "handler_semantic_primitives.rs"]
+mod primitives;
+use primitives::*;
+
+#[path = "handler_semantic_ext.rs"]
+mod ext;
+use ext::{
+    is_div_shape, is_idiv_shape, is_imul_shape, is_lockor_shape, is_mul_shape, is_rcl_shape, is_rcr_shape,
+    is_shl_shape, is_shld_shape, is_shr_shape, is_shrd_shape, is_vnop_shape, is_vpush_cr0_shape, is_vpush_cr3_shape,
+};
 
 /// VMP-semantic handler category from the cross-validated taxonomy in
 /// `AUDIT_REPORT.md` (Q2). Set on `HandlerClassification::vmp_semantic`
@@ -114,11 +150,14 @@ pub struct SemanticMatcher;
 impl SemanticMatcher {
     /// Classify a handler body. `None` = no fingerprint matched.
     ///
-    /// Ordering (see module doc for rationale): single-instruction
-    /// opcodes -> Vmexit -> Nand/Nor -> Add (before Push family,
-    /// which shares load-indirect + store-indirect) -> Ldd/Str
-    /// (two-load shapes) -> Pushreg/PushImm/Push fallback ->
-    /// Popreg/Pop fallback -> Vjmp -> Popf -> Vsetvsp catch-all.
+    /// Ordering (see module doc for full rationale, Commit L extends
+    /// it): single-instruction opcodes (Rdtsc, Cpuid, VpushCr0/Cr3)
+    /// -> Vmexit -> Lockor -> Nand/Nor -> arithmetic-base F7 family
+    /// (Mul/Imul/Div/Idiv) -> Add (before Push family, which shares
+    /// load-indirect + store-indirect) -> shifts/rotates
+    /// (Shl/Shr/Shld/Shrd/Rcl/Rcr) -> Ldd/Str (two-load shapes) ->
+    /// Pushreg/PushImm/Push fallback -> Popreg/Pop fallback -> Vjmp
+    /// -> Popf -> Vnop -> Vsetvsp catch-all.
     pub fn classify(bytecode: &[u8], bitness: Bitness) -> Option<VmpSemantic> {
         let _ = bitness;
         if bytecode.is_empty() {
@@ -130,8 +169,17 @@ impl SemanticMatcher {
         if contains_pair(bytecode, 0x0F, 0xA2) {
             return Some(VmpSemantic::Cpuid);
         }
+        if is_vpush_cr0_shape(bytecode) {
+            return Some(VmpSemantic::VpushCr0);
+        }
+        if is_vpush_cr3_shape(bytecode) {
+            return Some(VmpSemantic::VpushCr3);
+        }
         if is_vmexit(bytecode) {
             return Some(VmpSemantic::Vmexit);
+        }
+        if is_lockor_shape(bytecode) {
+            return Some(VmpSemantic::Lockor);
         }
         if is_nand_shape(bytecode) {
             return Some(VmpSemantic::Nand);
@@ -139,8 +187,38 @@ impl SemanticMatcher {
         if is_nor_shape(bytecode) {
             return Some(VmpSemantic::Nor);
         }
+        if is_mul_shape(bytecode) {
+            return Some(VmpSemantic::Mul);
+        }
+        if is_imul_shape(bytecode) {
+            return Some(VmpSemantic::Imul);
+        }
+        if is_div_shape(bytecode) {
+            return Some(VmpSemantic::Div);
+        }
+        if is_idiv_shape(bytecode) {
+            return Some(VmpSemantic::Idiv);
+        }
         if is_add_shape(bytecode) {
             return Some(VmpSemantic::Add);
+        }
+        if is_shl_shape(bytecode) {
+            return Some(VmpSemantic::Shl);
+        }
+        if is_shr_shape(bytecode) {
+            return Some(VmpSemantic::Shr);
+        }
+        if is_shld_shape(bytecode) {
+            return Some(VmpSemantic::Shld);
+        }
+        if is_shrd_shape(bytecode) {
+            return Some(VmpSemantic::Shrd);
+        }
+        if is_rcl_shape(bytecode) {
+            return Some(VmpSemantic::Rcl);
+        }
+        if is_rcr_shape(bytecode) {
+            return Some(VmpSemantic::Rcr);
         }
         if is_ldd_shape(bytecode) {
             return Some(VmpSemantic::Ldd);
@@ -169,6 +247,9 @@ impl SemanticMatcher {
         if is_popf_shape(bytecode) {
             return Some(VmpSemantic::Popf);
         }
+        if is_vnop_shape(bytecode) {
+            return Some(VmpSemantic::Vnop);
+        }
         if is_vsetvsp_shape(bytecode) {
             return Some(VmpSemantic::Vsetvsp);
         }
@@ -177,193 +258,10 @@ impl SemanticMatcher {
 }
 
 // ---------------------------------------------------------------------
-// Byte-level primitives.
-//
-// x86 / x86-64 encoding notes used below:
-//
-// - A REX prefix is any byte in 0x40..=0x4F. We tolerate its presence
-//   in front of any pattern; the specific REX bits (W/R/X/B) don't
-//   change the *shape* we care about here (an indirect load is still
-//   an indirect load whether the register is RAX or R14).
-// - ModR/M layout: `mod(2) | reg(3) | rm(3)`. `mod=11` means reg-reg,
-//   `mod=00` means [reg] with no displacement (with r/m=4 needing a
-//   SIB byte and r/m=5 meaning RIP-relative on x64 / disp32 on x86 --
-//   both are treated as non-matches for "MOV r, [r]" here).
-// ---------------------------------------------------------------------
-
-fn contains_pair(bytecode: &[u8], a: u8, b: u8) -> bool {
-    bytecode.windows(2).any(|w| w[0] == a && w[1] == b)
-}
-
-fn skip_rex(bytecode: &[u8], pos: usize) -> usize {
-    match bytecode.get(pos).copied() {
-        Some(0x40..=0x4F) => pos + 1,
-        _ => pos,
-    }
-}
-
-/// True when `[reg]` mod-form is at (post-REX) `p` with the given opcode.
-fn is_indirect_at(bytecode: &[u8], p: usize, opcode: u8) -> bool {
-    if bytecode.get(p).copied() != Some(opcode) {
-        return false;
-    }
-    match bytecode.get(p + 1).copied() {
-        Some(modrm) => {
-            let mode = modrm & 0xC0;
-            let rm = modrm & 0x07;
-            mode == 0x00 && rm != 4 && rm != 5
-        }
-        None => false,
-    }
-}
-
-/// True when `[reg+disp]` mod-form is at (post-REX) `p` with the given opcode.
-fn is_disp_at(bytecode: &[u8], p: usize, opcode: u8) -> bool {
-    if bytecode.get(p).copied() != Some(opcode) {
-        return false;
-    }
-    match bytecode.get(p + 1).copied() {
-        Some(modrm) => {
-            let mode = modrm & 0xC0;
-            mode == 0x40 || mode == 0x80
-        }
-        None => false,
-    }
-}
-
-/// Presence anywhere of `MOV r, [r]` (opcode 0x8B, mod=00).
-fn has_load_indirect(bytecode: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| is_indirect_at(bytecode, skip_rex(bytecode, i), 0x8B))
-}
-
-/// Presence anywhere of `MOV [r], r` (opcode 0x89, mod=00).
-fn has_store_indirect(bytecode: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| is_indirect_at(bytecode, skip_rex(bytecode, i), 0x89))
-}
-
-/// Presence anywhere of `MOV [r+disp], r` (opcode 0x89, mod=01 or mod=10).
-fn has_store_disp(bytecode: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| is_disp_at(bytecode, skip_rex(bytecode, i), 0x89))
-}
-
-/// Presence anywhere of a group-1 imm8 op with the given `/n` reg-field.
-/// `0x83 /0 imm8` = ADD reg, imm8 (reg encoded via 0xC0..=0xC7).
-/// `0x83 /5 imm8` = SUB reg, imm8 (reg encoded via 0xE8..=0xEF).
-fn has_group1_imm8(bytecode: &[u8], modrm_lo: u8, modrm_hi: u8) -> bool {
-    (0..bytecode.len()).any(|i| {
-        let p = skip_rex(bytecode, i);
-        bytecode.get(p).copied() == Some(0x83)
-            && matches!(bytecode.get(p + 1).copied(), Some(b) if b >= modrm_lo && b <= modrm_hi)
-    })
-}
-
-fn has_add_reg_imm8(bytecode: &[u8]) -> bool {
-    has_group1_imm8(bytecode, 0xC0, 0xC7)
-}
-
-fn has_sub_reg_imm8(bytecode: &[u8]) -> bool {
-    has_group1_imm8(bytecode, 0xE8, 0xEF)
-}
-
-/// Indirect JMP (`FF /4`) -- the shape VMP uses to tail-call the
-/// dispatcher after every handler.
-fn has_indirect_jmp(bytecode: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| {
-        let p = skip_rex(bytecode, i);
-        bytecode.get(p).copied() == Some(0xFF)
-            && bytecode
-                .get(p + 1)
-                .copied()
-                .map(|m| (m & 0x38) == 0x20)
-                .unwrap_or(false)
-    })
-}
-
-/// Count `NOT r/m` occurrences (opcode F7 /2, mod=11 encoded as 0xD0..=0xD7).
-///
-/// Uses a manual advance loop so a `REX F7 D?` triple isn't counted
-/// twice (once with REX skipped, once with the loop landing on `F7`
-/// directly). The `has_*` predicates above use `any()` and don't
-/// need this because they only need one witness per bytecode -- the
-/// double-scan is harmless for booleans but wrong for counts.
-fn count_not_ops(bytecode: &[u8]) -> usize {
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while i < bytecode.len() {
-        let p = skip_rex(bytecode, i);
-        if bytecode.get(p).copied() == Some(0xF7) && matches!(bytecode.get(p + 1).copied(), Some(0xD0..=0xD7)) {
-            count += 1;
-            i = p + 2;
-        } else {
-            i += 1;
-        }
-    }
-    count
-}
-
-/// Presence of a reg-reg group op (mod=11) from the given opcode set.
-/// Used for AND/OR/XOR in the De Morgan matchers.
-fn has_reg_reg_op(bytecode: &[u8], opcodes: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| {
-        let p = skip_rex(bytecode, i);
-        match bytecode.get(p).copied() {
-            Some(op) if opcodes.contains(&op) => bytecode
-                .get(p + 1)
-                .copied()
-                .map(|m| (m & 0xC0) == 0xC0)
-                .unwrap_or(false),
-            _ => false,
-        }
-    })
-}
-
-fn has_and_reg_reg(bytecode: &[u8]) -> bool {
-    has_reg_reg_op(bytecode, &[0x21, 0x23])
-}
-
-fn has_or_reg_reg(bytecode: &[u8]) -> bool {
-    has_reg_reg_op(bytecode, &[0x09, 0x0B])
-}
-
-/// `ADD r,r`: opcodes 0x01 (r/m,r) and 0x03 (r,r/m), both mod=11.
-/// Distinct from `has_add_reg_imm8` (the VSP `ADD reg,imm8` bump).
-fn has_add_reg_reg(bytecode: &[u8]) -> bool {
-    has_reg_reg_op(bytecode, &[0x01, 0x03])
-}
-
-/// `MOV r, [r+disp]` (opcode 0x8B, mod=01/10) -- the CTX-slot load
-/// shape that distinguishes `Pushreg` from `PushImm`.
-fn has_load_disp(bytecode: &[u8]) -> bool {
-    (0..bytecode.len()).any(|i| is_disp_at(bytecode, skip_rex(bytecode, i), 0x8B))
-}
-
-fn has_pushfq(bytecode: &[u8]) -> bool {
-    bytecode.contains(&0x9C)
-}
-
-fn has_popfq(bytecode: &[u8]) -> bool {
-    bytecode.contains(&0x9D)
-}
-
-/// Count `MOV r, [r]` (opcode 0x8B, mod=00). Manual advance loop for
-/// the same REX-double-count reason as `count_not_ops`.
-fn count_load_indirect(bytecode: &[u8]) -> usize {
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while i < bytecode.len() {
-        let p = skip_rex(bytecode, i);
-        if is_indirect_at(bytecode, p, 0x8B) {
-            count += 1;
-            i = p + 2;
-        } else {
-            i += 1;
-        }
-    }
-    count
-}
-
-// ---------------------------------------------------------------------
 // Composed patterns.
+//
+// Byte-level primitives (contains_pair, skip_rex, has_load_indirect,
+// etc.) live in `handler_semantic_primitives.rs`, glob-imported above.
 // ---------------------------------------------------------------------
 
 /// VMEXIT: POPFQ (x64) or POPAD (x86) within a small window before a
