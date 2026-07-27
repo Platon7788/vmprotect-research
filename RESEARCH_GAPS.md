@@ -241,7 +241,16 @@ Current strategy (`dispatch_table.rs:44-72`): try `.text`, then `.rdata`, then a
 
 ### 4.2 Operand crypto — what's known vs what we implement
 
-Current implementation (`src/decrypt.rs:22-30`):
+**Status update (Commit M):** `OpcodeCryptor` now dispatches over a
+`CryptoScheme` enum with per-version backends. `CryptoScheme::for_version`
+picks: `None` (Vmp1), `Vmp2Rolling` (Vmp2), `Vmp3PerHandler` (Vmp30/35/36),
+`Placeholder` (Unknown, backward-compat). `devirtualize_range` selects
+the scheme once per range and logs the choice. The `crc*31+val` recurrence
+is retained as the `Placeholder` variant so pre-existing test vectors keep
+passing. **Validation against real samples still remains open** — Days 6-7
+in AUDIT_REPORT.md are blocked on VMP-protected fixture availability.
+
+Historical implementation before Commit M (`src/decrypt.rs`):
 ```rust
 pub fn decrypt_operand(&self, encrypted_byte: u8, _cryptor_size: usize) -> u8 {
     let crc_low = (self.crc_value & 0xFF) as u8;

@@ -175,7 +175,18 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 - `OpcodeTable::from_json` теперь panic-safe: короткие `opcode_byte` строки возвращают `Err` вместо паники (`e586638`).
 - `read_imm` теперь отклоняет `size > 8` явной ошибкой вместо debug-panic / release-UB на shift-overflow (`e586638`).
 
-**Что осталось:** exhaustive match по всем handler-type строкам, генерируемым `handler_classifier::analyze_bytecode` — по-прежнему открыто, согласование с Q2 VMP-семантической таксономией (`VmpSemantic`) не выполнено — `decode_operands` всё ещё matches на старые x86-instruction-level имена (`MOV_REG_REG` и т.д.), не на `VmpSemantic`.
+**Commit M — real VMP crypto per version (частичное закрытие):**
+- `crc*31+val` placeholder заменён на `enum CryptoScheme { None, Placeholder, Vmp2Rolling, Vmp3PerHandler }` с `CryptoScheme::for_version()` для выбора по `VmpVersion`.
+- `OpcodeCryptor::new_with_scheme(scheme)` — новый preferred конструктор; `new()` сохранён (Placeholder) для backward compatibility.
+- `Vmp2Rolling` = XOR-key -> NEG -> ROL 5 -> INC + XOR-key update (из back.engineering VMP 2 write-up, gmh5225 GitHub mirror).
+- `Vmp3PerHandler` = XOR-key -> ROR 1 -> NOT + XOR-key update (из r0da VMP-3 Part 3 + vxcall VMProtect 3.8.1). Per-handler op selection ещё не реализован — применяется DEFAULT op set.
+- `devirtualize_range` теперь выбирает scheme через `for_version` и логгирует выбор.
+- +11 unit-тестов: routing table, invertibility (encrypt-then-decrypt) на Vmp2/Vmp3, N-step determinism на всех схемах, init_from_section seed check.
+
+**Что осталось:**
+- Validation против реальных VMP-decrypted operand-streams (Days 6-7, blocked без sample-бинарников).
+- Per-handler cryptor op selection для Vmp3 (нужна дизассемблированная handler-body — depend on Commit K register-role work).
+- Exhaustive match по всем handler-type строкам, генерируемым `handler_classifier::analyze_bytecode` — по-прежнему открыто, согласование с Q2 VMP-семантической таксономией (`VmpSemantic`) не выполнено — `decode_operands` всё ещё matches на старые x86-instruction-level имена (`MOV_REG_REG` и т.д.), не на `VmpSemantic`.
 
 **Оценка:** параллельно с оставшимися Q2 matchers, ~1 день.
 

@@ -38,7 +38,7 @@ pub mod xor_key_analyzer;
 
 pub use alu::{ALUOp, ALUReconstructor};
 pub use bytecode::Bytecode;
-pub use decrypt::OpcodeCryptor;
+pub use decrypt::{CryptoScheme, OpcodeCryptor};
 // Deliberately NOT re-exported at the crate root:
 //   - dispatch_extractor_py::{DispatchEntry, DispatchExtractorPy}
 // The Python-subprocess extractor is an internal orchestration seam
@@ -311,7 +311,18 @@ impl VmpDevirtualizer {
         let mut instructions = Vec::new();
         let mut vip = start_vip;
 
-        let mut cryptor = OpcodeCryptor::new();
+        // Commit M: crypto scheme is now per-version instead of the
+        // pre-existing `crc*31+val` placeholder for every sample. See
+        // `decrypt.rs` module doc for the extraction notes; the audit
+        // trail includes both the detected version and the picked
+        // scheme so log readers can spot a mis-detection.
+        let scheme = CryptoScheme::for_version(self.version);
+        log::info!(
+            "Operand crypto: version={} -> scheme={:?}",
+            self.version.as_str(),
+            scheme
+        );
+        let mut cryptor = OpcodeCryptor::new_with_scheme(scheme);
         cryptor.init_from_section(start_vip);
 
         while vip < end_vip {
