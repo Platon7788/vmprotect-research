@@ -27,6 +27,12 @@ handlers.json
 bytecode.json
 /vmp_devirt_dispatch_entries.json
 
+# Real-sample validation fixtures (tests/fixtures/README.md): third-party
+# VMP-protected binaries must never be committed. Directory structure and
+# .gitkeep placeholders are still tracked.
+tests/fixtures/*.exe
+tests/fixtures/**/*.exe
+
 # Secrets / env (must never commit)
 .env
 .env.*

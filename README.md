@@ -144,6 +144,34 @@ Real end-to-end validation against VMP-protected sample binaries has **not been 
 
 ---
 
+## Real-sample validation
+
+`cargo test` (no flags) never touches real VMP-protected binaries — every
+assertion above runs against synthetic in-memory PE fixtures. Actually
+validating the family/version detector and dispatch-table locator against
+real VMProtect output requires a `--features real-samples` opt-in:
+
+```bash
+cargo test --features real-samples
+```
+
+This compiles and runs `tests/samples.rs`, which walks `tests/fixtures/vmp1/`,
+`vmp2/`, `vmp30/`, `vmp35/`, `vmp36/`, and `non_vmp/` for `.exe` files, runs
+`vmp_devirt` against each, and checks the reported protector family, VMP
+version, and dispatch-table location against what that subdirectory is
+supposed to contain. An empty (or entirely absent) `tests/fixtures/` tree is
+not a failure — the harness logs a skip line per empty group and a one-line
+summary, then passes cleanly, because the corpus is user-provided and this
+project runs no CI (see `tests/fixtures/README.md` for sourcing, naming, and
+legal notes — **do not commit third-party VMP-protected binaries**).
+
+This makes the previously-aspirational "validate against real VMP-3
+binaries" line item (`RESEARCH_GAPS.md` §7 item #9) checkable: the harness
+exists now, and turns from "0 tests, 0 samples" into real pass/fail feedback
+the moment you drop binaries into `tests/fixtures/`.
+
+---
+
 ## Development
 
 ```bash
