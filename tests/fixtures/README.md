@@ -12,6 +12,18 @@ cargo test --features real-samples
 
 gives you an immediate pass/fail readout against them.
 
+## Fastest way to get a sample: `vmp_bait`
+
+The repo ships `examples/vmp_bait.rs` — a small Windows PE with five
+distinctive algorithmic hot-loops (`bait_fibonacci`, `bait_crc32`,
+`bait_bubble_sort`, `bait_reverse_bytes`, `bait_xor_chain`) chosen to
+exercise every major `VmpSemantic` matcher family this tool knows
+about. Build it, pack it with VMProtect (Free or Trial), drop the
+protected `.exe` here, and this harness picks it up automatically.
+
+**Full workflow** (build → VMProtect packaging → verification):
+[`docs/VMP_BAIT.md`](../../docs/VMP_BAIT.md).
+
 ## Legal note
 
 **Do not commit third-party proprietary binaries to this repository.**

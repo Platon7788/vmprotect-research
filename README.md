@@ -193,6 +193,22 @@ binaries" line item (`RESEARCH_GAPS.md` §7 item #9) checkable: the harness
 exists now, and turns from "0 tests, 0 samples" into real pass/fail feedback
 the moment you drop binaries into `tests/fixtures/`.
 
+### Fastest way to get a sample
+
+The repo ships `examples/vmp_bait.rs` — a small Windows PE with five
+distinctive algorithmic hot-loops chosen to exercise every major
+`VmpSemantic` matcher family. Build, pack with VMProtect Free/Trial,
+drop into `tests/fixtures/vmp*/`. Full walkthrough in
+[`docs/VMP_BAIT.md`](docs/VMP_BAIT.md).
+
+```bash
+cargo build --release --example vmp_bait --target x86_64-pc-windows-msvc
+# → target\x86_64-pc-windows-msvc\release\examples\vmp_bait.exe
+# → pack with VMProtect (see docs/VMP_BAIT.md)
+# → save as tests/fixtures/vmp36/bait_vmp36_msvc.exe
+cargo test --features real-samples
+```
+
 ### Synthetic-sample validation (structural, no real binaries needed)
 
 A second harness, gated behind `--features synthetic-samples`, does not wait
