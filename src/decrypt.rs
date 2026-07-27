@@ -96,13 +96,69 @@ mod tests {
     }
 
     #[test]
-    fn test_crc_update() {
+    fn test_crc_update_matches_documented_formula() {
+        // Pin down the exact `crc * 31 + val` recurrence — the earlier
+        // `assert_ne!(after, before)` accepted any monotonic-ish update
+        // (e.g. `crc + val`, `crc ^ val`) as valid, letting a formula
+        // regression silently corrupt every downstream operand decode.
         let mut cryptor = OpcodeCryptor::new();
-        let initial_crc = cryptor.get_crc();
+        cryptor.set_crc(0);
 
         cryptor.update_crc(0x11);
-        let after_update = cryptor.get_crc();
+        assert_eq!(cryptor.get_crc(), 0u64.wrapping_mul(31).wrapping_add(0x11));
 
-        assert_ne!(after_update, initial_crc);
+        cryptor.update_crc(0x22);
+        assert_eq!(cryptor.get_crc(), 0x11u64.wrapping_mul(31).wrapping_add(0x22));
+
+        cryptor.update_crc(0x33);
+        let expected_after_third = 0x11u64
+            .wrapping_mul(31)
+            .wrapping_add(0x22)
+            .wrapping_mul(31)
+            .wrapping_add(0x33);
+        assert_eq!(cryptor.get_crc(), expected_after_third);
+    }
+
+    /// A u32 round-trip: encrypt bytes locally (mirroring the decrypt +
+    /// update_crc cycle), then decrypt via the public API and assert both
+    /// the returned value and the resulting cryptor state.
+    #[test]
+    fn decrypt_value_u32_round_trip() {
+        let plaintext: u32 = 0xDEAD_BEEF;
+        let plain_bytes = plaintext.to_le_bytes();
+        let mut mirror_crc: u64 = 0x1234_5678;
+        let mut encrypted = [0u8; 4];
+        for (i, &b) in plain_bytes.iter().enumerate() {
+            encrypted[i] = b ^ (mirror_crc as u8);
+            mirror_crc = mirror_crc.wrapping_mul(31).wrapping_add(b as u64);
+        }
+
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0x1234_5678);
+        let decoded = cryptor.decrypt_value_u32(&encrypted);
+
+        assert_eq!(decoded, plaintext);
+        assert_eq!(cryptor.get_crc(), mirror_crc);
+    }
+
+    /// Same idea for u64 — guards `decrypt_value_u64`'s from_le_bytes
+    /// assembly against endianness / index mistakes.
+    #[test]
+    fn decrypt_value_u64_round_trip() {
+        let plaintext: u64 = 0xCAFE_BABE_DEAD_BEEF;
+        let plain_bytes = plaintext.to_le_bytes();
+        let mut mirror_crc: u64 = 0xA5A5_A5A5;
+        let mut encrypted = [0u8; 8];
+        for (i, &b) in plain_bytes.iter().enumerate() {
+            encrypted[i] = b ^ (mirror_crc as u8);
+            mirror_crc = mirror_crc.wrapping_mul(31).wrapping_add(b as u64);
+        }
+
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0xA5A5_A5A5);
+        let decoded = cryptor.decrypt_value_u64(&encrypted);
+
+        assert_eq!(decoded, plaintext);
+        assert_eq!(cryptor.get_crc(), mirror_crc);
     }
 }

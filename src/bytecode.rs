@@ -254,18 +254,16 @@ mod tests {
         assert!(bytecode.size(&handler).is_err());
     }
 
+    /// `operand_bytes`'s `_` wildcard covers every handler name outside
+    /// the known family constants; `"UNKNOWN"` and `"INVALID"` both hit
+    /// the same arm. Previously these were two identical tests.
     #[test]
-    fn test_size_unknown_handler_errors() {
+    fn test_size_unrecognized_handler_errors() {
         let bytecode = make_bytecode();
-        let handler = make_handler("UNKNOWN", None);
-        assert!(bytecode.size(&handler).is_err());
-    }
-
-    #[test]
-    fn test_size_invalid_handler_errors() {
-        let bytecode = make_bytecode();
-        let handler = make_handler("INVALID", None);
-        assert!(bytecode.size(&handler).is_err());
+        for name in ["UNKNOWN", "INVALID", "TOTALLY_NEW", ""] {
+            let handler = make_handler(name, None);
+            assert!(bytecode.size(&handler).is_err(), "handler {name:?} unexpectedly sized");
+        }
     }
 
     #[test]
@@ -335,6 +333,115 @@ mod tests {
         assert_eq!(operands.len(), 1);
         assert_eq!(operands[0], vip.wrapping_sub(0x0100_0000));
         assert!(operands[0] < vip, "backward jump must land before vip");
+    }
+
+    /// Positive-rel32 JMP still works after the sign-extension fix: a
+    /// small positive delta must move forward from `vip`, not overflow.
+    ///
+    /// Encrypted bytes pre-computed so cryptor(CRC=0) decrypts them to
+    /// the little-endian rel32 0x0000_0010 (= +16):
+    ///   want decrypted[0..4] = [0x10, 0x00, 0x00, 0x00]
+    ///   step 0: mask=0x00 -> enc=0x10, CRC := 31*0 + 0x10 = 0x10
+    ///   step 1: mask=0x10 -> enc=0x00^0x10=0x10, CRC := 31*0x10 = 0x1F0
+    ///   step 2: mask=0xF0 -> enc=0x00^0xF0=0xF0, CRC := 31*0x1F0 = 0x3C10
+    ///   step 3: mask=0x10 -> enc=0x00^0x10=0x10
+    #[test]
+    fn jmp_positive_rel32_produces_forward_target() {
+        let vip: u64 = 0x140002000;
+        let bytecode = Bytecode {
+            data: vec![0x11, 0x10, 0x10, 0xF0, 0x10],
+            vip,
+        };
+        let handler = make_handler(H_JMP, None);
+
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0);
+        let operands = bytecode.decode_operands(&handler, &mut cryptor).unwrap();
+
+        assert_eq!(operands, vec![vip + 0x10]);
+    }
+
+    /// H_NOR_CHAIN / H_NAND_CHAIN currently emit `[vip]` as the sole
+    /// operand and do NOT advance the cryptor (Q4 tracks routing chain
+    /// bytes through the cryptor in a later change). Lock the current
+    /// behaviour so an unintentional switch is visible in CI.
+    #[test]
+    fn nor_chain_operand_is_vip_and_leaves_cryptor_unchanged() {
+        let vip: u64 = 0x140002000;
+        let bytecode = Bytecode {
+            data: vec![0x11, 0xAA, 0xBB, 0xCC],
+            vip,
+        };
+        let handler = make_handler(H_NOR_CHAIN, Some(4));
+
+        let mut cryptor = OpcodeCryptor::new();
+        cryptor.set_crc(0xDEAD);
+        let operands = bytecode.decode_operands(&handler, &mut cryptor).unwrap();
+
+        assert_eq!(operands, vec![vip]);
+        assert_eq!(cryptor.get_crc(), 0xDEAD, "chain handler must not advance CRC yet");
+    }
+
+    /// POP_MEMORY reads one operand byte through the cryptor. Regression
+    /// against a change that would skip the cryptor for one-byte
+    /// operands (which used to happen with a raw `self.data.get(1)`
+    /// path before Days 4-5).
+    #[test]
+    fn pop_memory_routes_operand_byte_through_cryptor() {
+        let bytecode = Bytecode {
+            data: vec![0x11, 0x05, 0x00],
+            vip: 0x140002000,
+        };
+        let handler = make_handler(H_POP_MEMORY, None);
+
+        let mut cryptor_zero = OpcodeCryptor::new();
+        cryptor_zero.set_crc(0);
+        let with_zero = bytecode.decode_operands(&handler, &mut cryptor_zero).unwrap();
+
+        let mut cryptor_ff = OpcodeCryptor::new();
+        cryptor_ff.set_crc(0xFF);
+        let with_ff = bytecode.decode_operands(&handler, &mut cryptor_ff).unwrap();
+
+        // 0x05 XOR 0x00 = 0x05; 0x05 XOR 0xFF = 0xFA.
+        assert_eq!(with_zero, vec![0x05]);
+        assert_eq!(with_ff, vec![0xFA]);
+    }
+
+    /// Cryptor state must carry across handlers within a `devirtualize_range`
+    /// call — Days 4-5's core design contract. A regression that
+    /// re-seeded the cryptor per instruction would produce identical
+    /// results here; the shared-cryptor path must differ from the
+    /// fresh-cryptor path.
+    #[test]
+    fn cryptor_state_carries_across_sequential_decodes() {
+        let handler = make_handler(H_PUSH_VALUE, Some(5));
+        let bc = Bytecode {
+            data: vec![0x11, 0x11, 0x22, 0x33, 0x44],
+            vip: 0x140002000,
+        };
+
+        // Shared cryptor: state accumulates.
+        let mut shared = OpcodeCryptor::new();
+        shared.set_crc(0);
+        let first_shared = bc.decode_operands(&handler, &mut shared).unwrap();
+        let second_shared = bc.decode_operands(&handler, &mut shared).unwrap();
+
+        // Fresh cryptor each call: state resets.
+        let mut fresh_a = OpcodeCryptor::new();
+        fresh_a.set_crc(0);
+        let first_fresh = bc.decode_operands(&handler, &mut fresh_a).unwrap();
+
+        let mut fresh_b = OpcodeCryptor::new();
+        fresh_b.set_crc(0);
+        let second_fresh = bc.decode_operands(&handler, &mut fresh_b).unwrap();
+
+        // First call is identical (same initial state).
+        assert_eq!(first_shared, first_fresh);
+        // Second call MUST differ — proves the cryptor is stateful across handlers.
+        assert_ne!(
+            second_shared, second_fresh,
+            "shared cryptor must diverge from fresh cryptor on the second decode"
+        );
     }
 
     /// `read_imm` must refuse `size > 8` (the u64 width) instead of shift-

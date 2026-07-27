@@ -31,6 +31,11 @@ fn f2_non_vmp_binary_exits_with_code_2() {
 /// defaulting to the PE entry point means the run does not crash with
 /// "Invalid VA" on a fixture whose entry lies at image_base+0x1000
 /// rather than the old hardcoded 0x140001000.
+///
+/// Tightened to also match the CLI's "overridden by --force-version"
+/// stderr log, so a regression where `devirt.force_version(...)` is
+/// silently dropped (but the F2 gate happens to open some other way)
+/// would still fail this test.
 #[test]
 fn f3_force_version_bypasses_non_vmp_gate() {
     let fixture = write_minimal_pe(0x1_4000_0000, 0x1000, &[0x90; 32]);
@@ -40,7 +45,9 @@ fn f3_force_version_bypasses_non_vmp_gate() {
         .arg(fixture.path())
         .args(["--force-version", "vmp35"])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::contains("overridden by --force-version"))
+        .stderr(predicate::str::contains("VMP 3.5.0-3.5.1"));
 }
 
 /// F3 rejects unknown version strings at CLI parse time (exit 2 per clap).
@@ -101,6 +108,12 @@ fn short_flag_disambiguation_is_stable() {
 fn f1_vip_defaults_to_pe_entry_point() {
     // image_base 0x00400000 (classic PE32+ non-ASLR base) + entry rva
     // 0x1000 = 0x00401000, which is not 0x140001000.
+    //
+    // Tightened to match the specific "Starting devirtualization at VIP:
+    // 0x401000" log line the CLI emits: a regression that switches the
+    // default to any other in-range address (e.g. image_base + 0x1500)
+    // would still hit `success()`, since devirtualize_range silently
+    // swallows decode errors and returns Ok(vec![]).
     let fixture = write_minimal_pe(0x0040_0000, 0x1000, &[0x90; 32]);
 
     Command::cargo_bin("vmp_devirt")
@@ -108,5 +121,6 @@ fn f1_vip_defaults_to_pe_entry_point() {
         .arg(fixture.path())
         .args(["--force-version", "vmp35"])
         .assert()
-        .success();
+        .success()
+        .stderr(predicate::str::contains("Starting devirtualization at VIP: 0x401000"));
 }

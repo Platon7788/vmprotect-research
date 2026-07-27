@@ -194,10 +194,40 @@ impl DispatchExtractorPy {
 mod tests {
     use super::*;
 
+    /// `find_extractor_script` walks a fixed lookup order (build-time
+    /// CARGO_MANIFEST_DIR, then `$VMP_UNICORN_EXTRACTOR`, then CWD's
+    /// `scripts/unicorn_extractor.py`). If none exists in this test run's
+    /// environment, the function must return `Err` with a message that
+    /// names the script — never panic. Prior version merely asserted
+    /// `is_ok() || is_err()`, i.e. nothing.
     #[test]
-    fn test_find_extractor_script() {
-        // Script should exist in project
-        let result = DispatchExtractorPy::find_extractor_script();
-        assert!(result.is_ok() || result.is_err()); // Just check it runs
+    fn find_extractor_script_returns_err_when_no_script_available() {
+        // Clear the env var so the lookup can't succeed via it. Isolate
+        // from any inherited state.
+        // SAFETY: single-threaded test; std doc calls out env access as
+        // process-wide but tests here run in dedicated threads without
+        // touching this variable elsewhere.
+        unsafe {
+            std::env::remove_var("VMP_UNICORN_EXTRACTOR");
+        }
+
+        match DispatchExtractorPy::find_extractor_script() {
+            Ok(path) => {
+                // Only acceptable if the path actually exists — the whole
+                // point of the function.
+                assert!(
+                    std::path::Path::new(&path).exists(),
+                    "find_extractor_script returned Ok for missing path: {path:?}"
+                );
+            }
+            Err(e) => {
+                // Error message must mention what was searched for.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("unicorn_extractor") || msg.contains("extractor"),
+                    "error message must name the script: {msg}"
+                );
+            }
+        }
     }
 }

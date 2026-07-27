@@ -159,24 +159,25 @@ fn very_short_body_yields_none() {
 #[test]
 fn single_not_and_and_is_not_nand() {
     // Only ONE NOT plus an AND is not enough for a De Morgan pair;
-    // NAND requires at least two NOTs.
+    // NAND requires at least two NOTs. Pinned with `assert_eq!(None)`
+    // so a change that mislabels this body as any *other* variant
+    // (Vjmp, Push, ...) still fails the test — the earlier
+    // `assert_ne!(_, Some(Nand))` would silently pass.
     let body = [
         0x48, 0xF7, 0xD0, // NOT rax
         0x48, 0x21, 0xC8, // AND rax, rcx
     ];
-    assert_ne!(SemanticMatcher::classify(&body, Bitness::X64), Some(VmpSemantic::Nand));
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
 }
 
 #[test]
 fn stray_popfq_without_ret_is_not_vmexit() {
-    // POPFQ far from any 0xC3 must not trigger VMEXIT.
+    // POPFQ far from any 0xC3 must not trigger VMEXIT. Same tightening
+    // as above: exact-`None` rather than "just not Vmexit".
     let mut body = vec![0x9D];
     body.extend(std::iter::repeat_n(0x90, 40));
     body.push(0xC3);
-    assert_ne!(
-        SemanticMatcher::classify(&body, Bitness::X64),
-        Some(VmpSemantic::Vmexit)
-    );
+    assert_eq!(SemanticMatcher::classify(&body, Bitness::X64), None);
 }
 
 #[test]
