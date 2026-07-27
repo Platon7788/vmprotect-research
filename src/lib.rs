@@ -144,7 +144,16 @@ impl VmpDevirtualizer {
                 }
             }
             Err(e) => {
-                log::warn!("Failed to locate dispatch table: {}", e);
+                // `e`'s chain can bottom out in `DispatchTableLocator`'s
+                // pattern-scan bail, which embeds a PE section name — an
+                // attacker-controlled byte string. Sanitise the whole
+                // rendered chain defensively so a crafted section name can
+                // never inject ANSI/CR/LF into this log line, even if a
+                // future refactor changes which error propagates here.
+                log::warn!(
+                    "Failed to locate dispatch table: {}",
+                    pe_loader::sanitise_section_name(&e.to_string())
+                );
             }
         }
 

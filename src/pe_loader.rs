@@ -240,6 +240,35 @@ impl PEBinary {
     }
 }
 
+/// Escape a raw PE section name for safe inclusion in log lines / error
+/// messages.
+///
+/// Section names are attacker-controlled bytes read straight off disk
+/// (clamped to the 8-byte `IMAGE_SECTION_HEADER::Name` field elsewhere in
+/// this module) — nothing stops a crafted PE from naming a section
+/// `.vmp0\x1B[31m` and having that land verbatim in a `log::warn!`/
+/// `log::info!` call, letting it inject ANSI escapes (or CR/LF) into the
+/// analyst's terminal. Every byte outside the printable ASCII range
+/// `[0x20, 0x7E]` is rewritten as a `^X` caret-escape (`cat -v` style: `ESC`
+/// 0x1B -> `^[`, CR 0x0D -> `^M`, LF 0x0A -> `^J`, DEL 0x7F -> `^?`) or a
+/// `\xHH` escape for anything else, so the resulting string is always safe
+/// to interpolate into a single log line.
+pub(crate) fn sanitise_section_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match byte {
+            0x20..=0x7E => out.push(byte as char),
+            0x00..=0x1F => {
+                out.push('^');
+                out.push((byte + 0x40) as char);
+            }
+            0x7F => out.push_str("^?"),
+            _ => out.push_str(&format!("\\x{:02X}", byte)),
+        }
+    }
+    out
+}
+
 /// Shared minimal-PE fixture builder for lib-side tests.
 ///
 /// The generator is quite large (~330 lines including the multi-section
@@ -320,5 +349,46 @@ mod tests {
         let image_base = 0x1_4000_0000u64;
         let binary = build_minimal_pe(true, image_base, 0x1000, &[0xAAu8; 10]);
         assert!(binary.read_bytes_up_to(image_base + 0x00F0_0000, 10).is_err());
+    }
+
+    #[test]
+    fn sanitise_section_name_passes_through_printable_ascii() {
+        assert_eq!(sanitise_section_name(".vmp0"), ".vmp0");
+        assert_eq!(sanitise_section_name(".text"), ".text");
+    }
+
+    #[test]
+    fn sanitise_section_name_escapes_esc_cr_lf() {
+        // ESC (0x1B) -> ^[, CR (0x0D) -> ^M, LF (0x0A) -> ^J, per the
+        // `cat -v` convention documented on the function.
+        assert_eq!(sanitise_section_name("\x1B"), "^[");
+        assert_eq!(sanitise_section_name("\r"), "^M");
+        assert_eq!(sanitise_section_name("\n"), "^J");
+    }
+
+    #[test]
+    fn sanitise_section_name_neutralises_ansi_escape_sequence() {
+        // The AUDIT_REPORT.md-flagged crafted PE: a section literally named
+        // `.vmp0<ESC>[31mFAKE`, attempting to inject a red-text ANSI escape
+        // into the analyst's terminal via a log line.
+        let hostile = ".vmp0\x1B[31mFAKE";
+        let sanitised = sanitise_section_name(hostile);
+        assert!(
+            !sanitised.contains('\x1B'),
+            "raw ESC byte must not survive: {sanitised:?}"
+        );
+        assert!(sanitised.contains("^["), "ESC must be caret-escaped: {sanitised:?}");
+        assert!(sanitised.contains(".vmp0"));
+        assert!(sanitised.contains("FAKE"));
+    }
+
+    #[test]
+    fn sanitise_section_name_hex_escapes_high_bytes() {
+        // A byte outside [0x20, 0x7E] and not one of the named control
+        // characters must fall through to the \xHH form. `\u{80}` encodes
+        // to UTF-8 as the two bytes 0xC2 0x80, both non-printable-ASCII,
+        // exercising the \xHH branch without needing invalid UTF-8 input.
+        let sanitised = sanitise_section_name("\u{80}");
+        assert_eq!(sanitised, "\\xC2\\x80");
     }
 }

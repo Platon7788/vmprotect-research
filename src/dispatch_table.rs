@@ -3,6 +3,7 @@
 //! Finds and extracts VMP dispatch table from binary.
 
 use crate::dispatch_extractor_py::DispatchExtractorPy;
+use crate::pe_loader::sanitise_section_name;
 use crate::{PEBinary, XorKeyAnalyzer};
 use anyhow::Result;
 
@@ -24,7 +25,7 @@ impl DispatchTableLocator {
         let image_base = binary.image_base()?;
 
         if let Some(rva) = hint_rva {
-            let candidate_va = image_base + rva;
+            let candidate_va = image_base.saturating_add(rva);
             if Self::looks_like_dispatch_table(binary, candidate_va, 8)
                 || Self::looks_like_dispatch_table(binary, candidate_va, 4)
             {
@@ -113,7 +114,7 @@ impl DispatchTableLocator {
                     };
 
                     // Check if address is in reasonable range (image base ± 2GB)
-                    if addr >= image_base && addr < image_base + 0x80000000 {
+                    if addr >= image_base && addr < image_base.saturating_add(0x80000000) {
                         valid_count += 1;
                     }
                 }
@@ -133,13 +134,16 @@ impl DispatchTableLocator {
                     .trim_end_matches('\0');
 
                 if sec_name == section_name {
-                    let section_va = image_base + section.virtual_address as u64;
-                    return Ok(section_va + *offset as u64);
+                    let section_va = image_base.saturating_add(section.virtual_address as u64);
+                    return Ok(section_va.saturating_add(*offset as u64));
                 }
             }
         }
 
-        anyhow::bail!("No dispatch table pattern found in {}", section_name)
+        anyhow::bail!(
+            "No dispatch table pattern found in {}",
+            sanitise_section_name(section_name)
+        )
     }
 
     /// Extract all 256 handler addresses from dispatch table
@@ -225,7 +229,7 @@ impl DispatchTableLocator {
             .map(|oh| oh.standard_fields.address_of_entry_point as u64)
             .unwrap_or(0x1000);
 
-        Ok(image_base + entry_point_rva)
+        Ok(image_base.saturating_add(entry_point_rva))
     }
 
     /// Load known handlers from dispatch_table_info.json if available
@@ -283,7 +287,7 @@ impl DispatchTableLocator {
                 Err(_) => break,
             };
 
-            if addr >= image_base && addr < image_base + 0x8000_0000 {
+            if addr >= image_base && addr < image_base.saturating_add(0x8000_0000) {
                 valid_count += 1;
             }
         }
@@ -302,7 +306,7 @@ impl DispatchTableLocator {
             }
 
             // Check if address is in reasonable range
-            if handler_va >= image_base && handler_va < image_base + 0x80000000 {
+            if handler_va >= image_base && handler_va < image_base.saturating_add(0x80000000) {
                 valid_count += 1;
             }
         }
@@ -421,5 +425,67 @@ mod tests {
         let va = DispatchTableLocator::find_dispatch_pattern(&entries, &binary, ".test")
             .expect("exact-size table must be located");
         assert_eq!(va, image_base + 0x1000);
+    }
+
+    /// Regression for the Fix-3 arithmetic sweep (AUDIT_REPORT.md §3): with
+    /// `image_base` sitting 0x100 short of `u64::MAX`, `image_base + rva`
+    /// (rva = 0x1000, i.e. bigger than the remaining headroom) previously
+    /// panicked in debug builds on the plain `+` in `locate`'s hint-validation
+    /// path. A hostile PE only needs a `windows_fields.image_base` near the
+    /// top of the address space to trigger this on `--dispatch-rva` hint
+    /// validation; `saturating_add` must make it merely fail to validate
+    /// instead of aborting the whole tool.
+    #[test]
+    fn locate_does_not_panic_with_image_base_near_u64_max() {
+        let image_base = u64::MAX - 0x100;
+        let section_rva = 0x1000u32;
+        // valid_count = 0 -- the helper's own arithmetic only kicks in for
+        // entries below valid_count, so this keeps the fixture builder
+        // itself overflow-free regardless of image_base.
+        let entries = make_entries(image_base, 0, 8);
+        let binary = build_minimal_pe(image_base, section_rva, &entries);
+
+        // hint_rva = 0x1000 pushes image_base + rva past u64::MAX.
+        let result = DispatchTableLocator::locate(&binary, Some(0x1000));
+        assert!(
+            result.is_err(),
+            "saturated candidate VA cannot validate as a dispatch table; must not panic getting there"
+        );
+    }
+
+    /// Regression for the log-injection fix (AUDIT_REPORT.md §3): a section
+    /// name containing an ANSI escape byte must never survive verbatim into
+    /// `find_dispatch_pattern`'s bail message. The section name here is
+    /// attacker-controlled (read straight from the PE section header), so
+    /// an unsanitised bail could inject `\x1B[31m` into whatever terminal
+    /// later renders the error/log chain.
+    #[test]
+    fn find_dispatch_pattern_error_sanitises_hostile_section_name() {
+        use crate::pe_loader::test_util::build_minimal_pe_with_section_name;
+
+        let image_base = 0x1_4000_0000u64;
+        // 8-byte PE section-name field: ".vmp" + ESC + "[31" (dropping the
+        // trailing "m" of the illustrative AUDIT_REPORT.md example to fit).
+        let hostile_name = ".vmp\x1B[31";
+        assert_eq!(hostile_name.len(), 8);
+
+        // No valid pointer run -> find_dispatch_pattern must fail and bail
+        // with a message embedding (a sanitised form of) this section name.
+        let entries = make_entries(image_base, 0, 8);
+        let binary = build_minimal_pe_with_section_name(true, image_base, hostile_name, &entries);
+
+        let err = DispatchTableLocator::find_dispatch_pattern(&entries, &binary, hostile_name)
+            .expect_err("no valid pointer run present, must error");
+        let message = err.to_string();
+
+        assert!(
+            !message.contains('\x1B'),
+            "raw ESC byte must not survive into the error message: {message:?}"
+        );
+        assert!(
+            message.contains("^["),
+            "ESC must be caret-escaped in the error message: {message:?}"
+        );
+        assert!(message.contains(".vmp"));
     }
 }

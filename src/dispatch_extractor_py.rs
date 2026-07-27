@@ -104,7 +104,7 @@ impl DispatchExtractorPy {
         // Validate entries
         let valid_count = entries
             .iter()
-            .filter(|e| e.decrypted >= image_base && e.decrypted < image_base + 0x80000000)
+            .filter(|e| e.decrypted >= image_base && e.decrypted < image_base.saturating_add(0x80000000))
             .count();
 
         log::info!("Valid entries: {}/{}", valid_count, entries.len());

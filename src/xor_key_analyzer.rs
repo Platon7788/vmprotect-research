@@ -64,7 +64,7 @@ impl XorKeyAnalyzer {
 
         // Read all 256 dispatch table entries
         for opcode in 0..=255u8 {
-            let entry_va = dispatch_table_va + (opcode as u64 * entry_size);
+            let entry_va = dispatch_table_va.saturating_add((opcode as u64).saturating_mul(entry_size));
 
             let entry_read = match bitness {
                 Bitness::X86 => binary.read_u32(entry_va).map(u64::from),
@@ -125,7 +125,7 @@ impl XorKeyAnalyzer {
             let decrypted = encrypted_addr ^ key;
 
             // Check if decrypted address is in reasonable range
-            if decrypted >= image_base && decrypted < image_base + 0x80000000 {
+            if decrypted >= image_base && decrypted < image_base.saturating_add(0x80000000) {
                 return Ok(key);
             }
         }
@@ -134,7 +134,7 @@ impl XorKeyAnalyzer {
         // Many VMP versions use opcode as part of the key
         let opcode_key = Self::derive_opcode_key(opcode);
         let decrypted = encrypted_addr ^ opcode_key;
-        if decrypted >= image_base && decrypted < image_base + 0x80000000 {
+        if decrypted >= image_base && decrypted < image_base.saturating_add(0x80000000) {
             return Ok(opcode_key);
         }
 
@@ -224,7 +224,7 @@ impl XorKeyAnalyzer {
                 };
 
                 let decrypted = encrypted_addr ^ key;
-                if decrypted >= image_base && decrypted < image_base + 0x80000000 {
+                if decrypted >= image_base && decrypted < image_base.saturating_add(0x80000000) {
                     return Some(key);
                 }
             }
@@ -272,7 +272,7 @@ impl XorKeyAnalyzer {
             }
 
             // Check if decrypted address is in reasonable range
-            if entry.decrypted >= image_base && entry.decrypted < image_base + 0x80000000 {
+            if entry.decrypted >= image_base && entry.decrypted < image_base.saturating_add(0x80000000) {
                 valid_count += 1;
             }
         }
@@ -342,6 +342,29 @@ pub struct KeyStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the Fix-3 arithmetic sweep (AUDIT_REPORT.md §3):
+    /// `capture_keys` computed each entry's VA as
+    /// `dispatch_table_va + opcode * entry_size` with plain `+`/`*`. A
+    /// dispatch-table VA within a few thousand bytes of `u64::MAX` (e.g.
+    /// recovered from a malformed/hostile `--dispatch-rva` hint) overflowed
+    /// that addition once `opcode` climbed high enough, panicking in debug
+    /// builds instead of just failing the (out-of-bounds) read. Must
+    /// saturate and return placeholder entries instead of panicking.
+    #[test]
+    fn capture_keys_does_not_panic_with_dispatch_table_va_near_u64_max() {
+        use crate::pe_loader::test_util::build_minimal_pe;
+
+        let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0xAAu8; 16]);
+        let dispatch_table_va = u64::MAX - 4;
+
+        let keys = XorKeyAnalyzer::capture_keys(&binary, dispatch_table_va).expect("must not panic or error");
+        assert_eq!(keys.len(), 256);
+        // Every entry's VA is out of bounds (saturated to u64::MAX or past
+        // any real section), so every read fails and the placeholder path
+        // (key=0, encrypted=0) is what gets pushed for all 256 opcodes.
+        assert!(keys.iter().all(|k| k.key == 0 && k.encrypted == 0));
+    }
 
     #[test]
     fn test_opcode_key_derivation() {
