@@ -15,14 +15,29 @@
 //! fired without a vendor hit) or [`ProtectorFamily::Unprotected`] (no
 //! signals at all).
 //!
-//! Coverage in this initial module is intentionally narrow — VMProtect,
-//! the five common file-compressor families, and the class-level
-//! catch-all. Per-vendor byte-table matchers for Themida, Enigma,
-//! Obsidium, Armadillo, ASPack, Code Virtualizer, and friends are the
-//! task of the follow-up (see `RESEARCH_GAPS.md` §2.1 and §2.2).
+//! Coverage now includes VMProtect, seven VM-based protector vendors
+//! (Themida/WinLicense, Code Virtualizer, Enigma, Obsidium, Armadillo,
+//! ASPack/ASProtect, Denuvo), the five common file-compressor families,
+//! two special-cased VMP-wrappers (BattlEye BEDaisy → VmProtect,
+//! Vanguard/Packman → UnknownProtector), and the class-level catch-all.
+//! Per-vendor byte-pattern data lives in `protector_matchers.rs` — see
+//! `RESEARCH_GAPS.md` §2.1 for the citations behind each fingerprint.
 
+use crate::protector_matchers::{
+    contains_bytes, contains_pattern, ARMADILLO_SECTION_NAMES, ARMADILLO_STUB, ASPACK_SECTION_NAMES, ASPACK_STUB,
+    CODE_VIRTUALIZER_DISPATCHER, ENIGMA_SECTION_NAMES, ENIGMA_STRING_MARKERS, ENIGMA_STUB, OBSIDIUM_STUB,
+    THEMIDA_DLL_STUB, THEMIDA_SECTION_NAMES, THEMIDA_STRING_MARKERS, THEMIDA_V1_COMPRESSED_STUB,
+    THEMIDA_V1_UNCOMPRESSED_STUB,
+};
+use crate::protector_signals as signals;
+use crate::version_matchers::EntryStubMatcher;
 use crate::PEBinary;
 use anyhow::{Context, Result};
+
+/// Byte window scanned from the entry point when looking for vendor stubs.
+/// Same size as the version detector's window — small enough that a wrong
+/// entry section (bare fixture with `.test`) still bounds the read.
+const ENTRY_SCAN_WINDOW: usize = 64;
 
 /// Windows PE protector / packer families this tool is aware of.
 ///
@@ -164,21 +179,6 @@ const MIN_VENDOR_CONFIDENCE: u16 = 40;
 /// Minimum point total for `UnknownProtector` to override `Unprotected`.
 const MIN_UNKNOWN_CONFIDENCE: u16 = 30;
 
-/// PE `Characteristics` bit for executable code.
-const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
-/// PE `Characteristics` bit for writable memory.
-const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
-
-/// Threshold above which a section's Shannon entropy counts as
-/// "packed/encrypted" (bits per byte). 7.0 is the widely-used cut-off,
-/// e.g. Detect It Easy, REMINDer, PE-LiteScan.
-const ENTROPY_THRESHOLD: f64 = 7.0;
-
-/// Maximum number of PE imports considered a "stripped IAT" — every
-/// remaining import is usually just `LoadLibraryA` / `GetProcAddress` /
-/// `VirtualProtect` / `VirtualAlloc` / `ExitProcess` and cousins.
-const STRIPPED_IAT_MAX: usize = 12;
-
 /// Protector-family detector.
 pub struct ProtectorDetector;
 
@@ -189,12 +189,24 @@ impl ProtectorDetector {
         let sections = binary.get_all_sections().context("enumerate PE sections")?;
 
         let mut vmprotect = FamilyScore::default();
+        let mut themida = FamilyScore::default();
+        let mut code_virtualizer = FamilyScore::default();
+        let mut enigma = FamilyScore::default();
+        let mut obsidium = FamilyScore::default();
+        let mut armadillo = FamilyScore::default();
+        let mut aspack = FamilyScore::default();
+        let mut denuvo = FamilyScore::default();
         let mut upx = FamilyScore::default();
         let mut mpress = FamilyScore::default();
         let mut petite = FamilyScore::default();
         let mut pecompact = FamilyScore::default();
         let mut upack = FamilyScore::default();
         let mut unknown = FamilyScore::default();
+
+        // Entry-point bytes borrowed for every vendor's stub matcher below.
+        // `ok()` swallows a header-parse error — a truly malformed PE just
+        // means no stub rules fire, which is the correct fallback.
+        let entry_bytes = binary.entry_point_bytes(ENTRY_SCAN_WINDOW).ok();
 
         // --- Vendor: VMProtect (section names + literal marker) ------
         //
@@ -209,14 +221,140 @@ impl ProtectorDetector {
         } else if has_vmp0 || has_vmp1 {
             vmprotect.add(50, "one of `.vmp0`/`.vmp1` present");
         }
-        if binary.data.windows(9).any(|w| w == b"VMProtect") {
+        if contains_bytes(&binary.data, b"VMProtect") {
             vmprotect.add(15, "literal \"VMProtect\" string");
         }
         // ZwProtectVirtualMemory tends to be a 3.x-era API rather than
         // 2.x's VirtualProtect — cheap version-side signal that also
         // confirms VMProtect at the family layer.
-        if binary.data.windows(22).any(|w| w == b"ZwProtectVirtualMemory") {
+        if contains_bytes(&binary.data, b"ZwProtectVirtualMemory") {
             vmprotect.add(15, "literal \"ZwProtectVirtualMemory\" string (VMP 3.x-era)");
+        }
+
+        // --- Vendor: Themida / WinLicense ----------------------------
+        for &name in THEMIDA_SECTION_NAMES {
+            if sections.iter().any(|s| s == name) {
+                themida.add(40, format!("Themida section name `{name}`"));
+            }
+        }
+        for &marker in THEMIDA_STRING_MARKERS {
+            if contains_bytes(&binary.data, marker) {
+                themida.add(15, format!("literal \"{}\" string", String::from_utf8_lossy(marker)));
+            }
+        }
+        if let Some(bytes) = entry_bytes.as_deref() {
+            if EntryStubMatcher::matches(bytes, &THEMIDA_V1_COMPRESSED_STUB) {
+                themida.add(40, "Themida v1.x compressed entry stub");
+            }
+            if EntryStubMatcher::matches(bytes, &THEMIDA_V1_UNCOMPRESSED_STUB) {
+                themida.add(40, "Themida v1.x uncompressed entry stub");
+            }
+            if EntryStubMatcher::matches(bytes, &THEMIDA_DLL_STUB) {
+                themida.add(30, "Themida DLL v1.8-1.9 entry stub");
+            }
+        }
+
+        // --- Vendor: Enigma Protector --------------------------------
+        for &name in ENIGMA_SECTION_NAMES {
+            if sections.iter().any(|s| s == name) {
+                enigma.add(50, format!("Enigma section name `{name}`"));
+            }
+        }
+        for &marker in ENIGMA_STRING_MARKERS {
+            if contains_bytes(&binary.data, marker) {
+                enigma.add(15, format!("literal \"{}\" string", String::from_utf8_lossy(marker)));
+            }
+        }
+        if let Some(bytes) = entry_bytes.as_deref() {
+            if EntryStubMatcher::matches(bytes, &ENIGMA_STUB) {
+                enigma.add(40, "Enigma entry-stub prelude");
+            }
+        }
+
+        // --- Vendor: Obsidium ----------------------------------------
+        if let Some(bytes) = entry_bytes.as_deref() {
+            if EntryStubMatcher::matches(bytes, &OBSIDIUM_STUB) {
+                obsidium.add(50, "Obsidium short-jump anti-disasm entry stub");
+            }
+        }
+
+        // --- Vendor: Armadillo / SoftwarePassport --------------------
+        //
+        // `.pdata` collides with the real x64 unwind-info section, so
+        // require at least TWO section-name hits before firing. This
+        // deliberately trades recall for precision on well-behaved x64
+        // binaries that happen to have `.pdata`.
+        let armadillo_section_hits = ARMADILLO_SECTION_NAMES
+            .iter()
+            .filter(|&&name| sections.iter().any(|s| s == name))
+            .count();
+        if armadillo_section_hits >= 2 {
+            let matched: Vec<&str> = ARMADILLO_SECTION_NAMES
+                .iter()
+                .copied()
+                .filter(|&name| sections.iter().any(|s| s == name))
+                .collect();
+            armadillo.add(45, format!("Armadillo section names present: {matched:?}"));
+        }
+        if let Some(bytes) = entry_bytes.as_deref() {
+            if EntryStubMatcher::matches(bytes, &ARMADILLO_STUB) {
+                armadillo.add(40, "Armadillo entry-stub prelude");
+            }
+        }
+        if contains_bytes(&binary.data, b"CopyMemII") {
+            armadillo.add(25, "literal \"CopyMemII\" string");
+        }
+
+        // --- Vendor: ASPack / ASProtect ------------------------------
+        for &name in ASPACK_SECTION_NAMES {
+            if sections.iter().any(|s| s == name) {
+                aspack.add(50, format!("ASPack section name `{name}`"));
+            }
+        }
+        if let Some(bytes) = entry_bytes.as_deref() {
+            if EntryStubMatcher::matches(bytes, &ASPACK_STUB) {
+                aspack.add(40, "ASPack entry-stub prelude");
+            }
+        }
+
+        // --- Vendor: Code Virtualizer (Oreans standalone) ------------
+        //
+        // The 7-byte dispatcher fingerprint is specific enough for a
+        // whole-file scan to be false-positive-safe. Scanning `binary.data`
+        // rather than per-section keeps the code short and picks up
+        // dispatchers in obfuscator-renamed code sections.
+        if contains_pattern(&binary.data, &CODE_VIRTUALIZER_DISPATCHER, binary.data.len()) {
+            code_virtualizer.add(60, "Code Virtualizer dispatcher fingerprint (AC 0F B6 C0 FF 24 87)");
+        }
+
+        // --- Vendor: Denuvo Anti-Tamper (detect and refuse) ----------
+        //
+        // Section literally named `.vm` is the classic Denuvo marker.
+        // Roughly 30% false positive rate against benign binaries, which
+        // is acceptable given Denuvo's ubiquity in commercial games.
+        if sections.iter().any(|s| s == ".vm") {
+            denuvo.add(60, "Denuvo `.vm` section (case-sensitive)");
+        }
+
+        // --- BattlEye BEDaisy (VMP wrapper with scrubbed sections) ---
+        //
+        // BattlEye rewraps VMProtect with a scrubbed section name. The
+        // structural VMP-3 matchers would fire on real code but our
+        // section-name gate misses it, so `.be0` bumps VmProtect
+        // directly and lets `VmpDevirtualizer` take over.
+        if sections.iter().any(|s| s == ".be0") {
+            vmprotect.add(60, "BattlEye BEDaisy `.be0` section (VMP-family shell)");
+        }
+
+        // --- Vanguard stub.dll (Packman shell) -----------------------
+        //
+        // Packman isn't in the ProtectorFamily enum. Feed
+        // `UnknownProtector` with a specific reason string so operators
+        // can spot the Riot Vanguard wrapper without scrolling through
+        // the class-level signals.
+        let stub_count = sections.iter().filter(|s| *s == ".stub").count();
+        if stub_count >= 2 {
+            unknown.add(30, "Vanguard/Packman shell (.stub x2)");
         }
 
         // --- Compressors (section-name allowlist) --------------------
@@ -246,28 +384,38 @@ impl ProtectorDetector {
         // prevents a well-behaved binary that happens to have one W+X
         // section (unusual but not unheard of) from being labelled
         // "protector" on that alone.
-        if Self::has_wx_section(binary).unwrap_or(false) {
+        if signals::has_wx_section(binary).unwrap_or(false) {
             unknown.add(20, "at least one W+X section (writable + executable)");
         }
-        if let Ok(entries) = Self::high_entropy_sections(binary) {
+        if let Ok(entries) = signals::high_entropy_sections(binary) {
             if !entries.is_empty() {
                 let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
-                unknown.add(15, format!("high-entropy sections (> {ENTROPY_THRESHOLD}): {names:?}"));
+                unknown.add(
+                    15,
+                    format!("high-entropy sections (> {}): {names:?}", signals::ENTROPY_THRESHOLD),
+                );
             }
         }
-        if Self::import_count(binary)
-            .map(|c| c <= STRIPPED_IAT_MAX)
+        if signals::import_count(binary)
+            .map(|c| c <= signals::STRIPPED_IAT_MAX)
             .unwrap_or(false)
         {
-            unknown.add(15, format!("stripped IAT (<= {STRIPPED_IAT_MAX} imports)"));
+            unknown.add(15, format!("stripped IAT (<= {} imports)", signals::STRIPPED_IAT_MAX));
         }
-        if Self::entry_point_outside_text(binary).unwrap_or(false) {
+        if signals::entry_point_outside_text(binary).unwrap_or(false) {
             unknown.add(20, "entry point falls outside `.text`");
         }
 
         // --- Pick winner ---------------------------------------------
         let vendor_candidates = [
             (ProtectorFamily::VmProtect, vmprotect),
+            (ProtectorFamily::Themida, themida),
+            (ProtectorFamily::CodeVirtualizer, code_virtualizer),
+            (ProtectorFamily::EnigmaProtector, enigma),
+            (ProtectorFamily::Obsidium, obsidium),
+            (ProtectorFamily::Armadillo, armadillo),
+            (ProtectorFamily::AsPack, aspack),
+            (ProtectorFamily::Denuvo, denuvo),
             (ProtectorFamily::Upx, upx),
             (ProtectorFamily::Mpress, mpress),
             (ProtectorFamily::Petite, petite),
@@ -303,99 +451,13 @@ impl ProtectorDetector {
 
         Ok(report)
     }
-
-    /// True when any section has both `MEM_EXECUTE` and `MEM_WRITE` set.
-    fn has_wx_section(binary: &PEBinary) -> Result<bool> {
-        let names = binary.get_all_sections()?;
-        for name in names {
-            if let Ok(ch) = binary.section_characteristics(&name) {
-                if (ch & IMAGE_SCN_MEM_EXECUTE) != 0 && (ch & IMAGE_SCN_MEM_WRITE) != 0 {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Sections whose Shannon entropy exceeds [`ENTROPY_THRESHOLD`],
-    /// excluding `.rsrc` (resources are naturally high-entropy: PNG,
-    /// compressed strings, digital signatures).
-    fn high_entropy_sections(binary: &PEBinary) -> Result<Vec<(String, f64)>> {
-        let names = binary.get_all_sections()?;
-        let mut hits = Vec::new();
-        for name in names {
-            if name == ".rsrc" {
-                continue;
-            }
-            let data = match binary.get_section(&name) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            if data.len() < 256 {
-                continue;
-            }
-            let ent = shannon_entropy(&data);
-            if ent > ENTROPY_THRESHOLD {
-                hits.push((name, ent));
-            }
-        }
-        Ok(hits)
-    }
-
-    /// Count of resolved imports across all import descriptors.
-    fn import_count(binary: &PEBinary) -> Result<usize> {
-        let pe = binary.parse_pe()?;
-        Ok(pe.imports.len())
-    }
-
-    /// True when the entry-point VA does NOT fall inside a section named
-    /// `.text`. Bootstrap stubs in a packer section satisfy this.
-    fn entry_point_outside_text(binary: &PEBinary) -> Result<bool> {
-        let entry_va = binary.entry_point_va()?;
-        let pe = binary.parse_pe()?;
-        let image_base = binary.image_base()?;
-        for section in &pe.sections {
-            let start = image_base.saturating_add(section.virtual_address as u64);
-            let effective = (section.virtual_size as u64).min(section.size_of_raw_data as u64);
-            let end = start.saturating_add(effective);
-            if entry_va >= start && entry_va < end {
-                let name = std::str::from_utf8(&section.name[..])
-                    .unwrap_or("")
-                    .trim_end_matches('\0');
-                return Ok(name != ".text");
-            }
-        }
-        // Entry VA lands in no section at all — very unusual, treat as suspicious.
-        Ok(true)
-    }
-}
-
-/// Shannon entropy of a byte slice, in bits per byte (0.0 – 8.0).
-fn shannon_entropy(data: &[u8]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    let mut counts = [0u64; 256];
-    for &b in data {
-        counts[b as usize] += 1;
-    }
-    let len = data.len() as f64;
-    let mut entropy = 0.0;
-    for &c in counts.iter() {
-        if c == 0 {
-            continue;
-        }
-        let p = c as f64 / len;
-        entropy -= p * p.log2();
-    }
-    entropy
 }
 
 /// Count byte-frequency histogram once for cheap tests to inspect
 /// entropy computations without duplicating the logic.
 #[cfg(test)]
 pub(crate) fn shannon_entropy_for_tests(data: &[u8]) -> f64 {
-    shannon_entropy(data)
+    signals::shannon_entropy(data)
 }
 
 #[cfg(test)]

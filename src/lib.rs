@@ -28,6 +28,8 @@ pub mod handler_semantic;
 pub mod opcode_table;
 pub mod pe_loader;
 pub mod protector;
+mod protector_matchers;
+mod protector_signals;
 pub mod version;
 mod version_matchers;
 pub mod xor_key_analyzer;

@@ -4,7 +4,9 @@
 //! stays under the project's 500-line ceiling.
 
 use super::*;
-use crate::pe_loader::test_util::build_minimal_pe;
+use crate::pe_loader::test_util::{
+    build_minimal_pe, build_minimal_pe_with_named_sections, build_minimal_pe_with_section_name,
+};
 
 // -------------------------------------------------------------------
 // Enum / helper hygiene
@@ -213,4 +215,240 @@ fn family_score_saturates_at_100() {
     s.add(60, "two");
     assert_eq!(s.confidence(), 100);
     assert_eq!(s.reasons.len(), 2);
+}
+
+// -------------------------------------------------------------------
+// Vendor byte-table matchers — Commit F
+// -------------------------------------------------------------------
+//
+// Each vendor gets at least one positive test (marker fires -> family
+// selected) and one negative-covered-elsewhere check. The bare-fixture
+// negative baseline lives in
+// `detector_labels_plain_pe_as_unprotected_or_unknown` above, so vendor
+// tests here only need to prove the positive path.
+
+/// Themida section-name allowlist path: a section literally named
+/// `.themida` alone gives +40, right at MIN_VENDOR_CONFIDENCE. The
+/// verdict should land on Themida with confidence >= 40.
+#[test]
+fn detector_identifies_themida_from_dot_themida_section_name() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".themida", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::Themida, "reasons: {:?}", report.reasons);
+    assert!(report.confidence >= 40);
+    assert!(report.reasons.iter().any(|r| r.contains(".themida")));
+}
+
+/// Themida 2.1.x / 3.0.x per-build randomised names include the 8-space
+/// section name — must fire the Themida branch.
+#[test]
+fn detector_identifies_themida_from_eight_space_section_name() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, "        ", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::Themida, "reasons: {:?}", report.reasons);
+}
+
+/// Themida v1.x uncompressed entry stub planted at RVA 0x1000 (fixture's
+/// entry point). The 15-byte prelude is verbatim; +40 to Themida.
+#[test]
+fn detector_identifies_themida_from_v1_uncompressed_entry_stub() {
+    let stub = [
+        0x55, 0x8B, 0xEC, 0x83, 0xC4, 0xD8, 0x60, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x5A, 0x81, 0xEA,
+    ];
+    let mut body = stub.to_vec();
+    body.extend_from_slice(&[0u8; 128]);
+    let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &body);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::Themida, "reasons: {:?}", report.reasons);
+    assert!(report.reasons.iter().any(|r| r.contains("Themida")));
+}
+
+/// Enigma section-name path.
+#[test]
+fn detector_identifies_enigma_from_dot_enigma1_section_name() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".enigma1", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::EnigmaProtector,
+        "reasons: {:?}",
+        report.reasons
+    );
+    assert!(report.confidence >= 40);
+}
+
+/// Enigma entry-stub prelude planted at entry -> +40 to Enigma.
+#[test]
+fn detector_identifies_enigma_from_entry_stub_prelude() {
+    let stub = [0x60, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x5D, 0x8B, 0xD5, 0x81, 0xED];
+    let mut body = stub.to_vec();
+    body.extend_from_slice(&[0u8; 128]);
+    let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &body);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::EnigmaProtector,
+        "reasons: {:?}",
+        report.reasons
+    );
+}
+
+/// Obsidium short-jump anti-disasm entry stub planted at entry -> +50 to
+/// Obsidium. Solo signal must clear MIN_VENDOR_CONFIDENCE.
+#[test]
+fn detector_identifies_obsidium_from_short_jump_entry_stub() {
+    let stub = [0xEB, 0x03, 0x11, 0x22, 0x33, 0xE8, 0x44, 0x55, 0x66, 0x77, 0x58];
+    let mut body = stub.to_vec();
+    body.extend_from_slice(&[0u8; 128]);
+    let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &body);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::Obsidium,
+        "reasons: {:?}",
+        report.reasons
+    );
+}
+
+/// Armadillo requires TWO of its section names to co-occur before firing.
+/// Fixture places `.text1` + `.data1` — enough to trigger the rule.
+#[test]
+fn detector_identifies_armadillo_from_two_section_names() {
+    let binary =
+        build_minimal_pe_with_named_sections(true, 0x1_4000_0000, &[(".text1", &[0u8; 32]), (".data1", &[0u8; 32])]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::Armadillo,
+        "reasons: {:?}",
+        report.reasons
+    );
+    assert!(report.reasons.iter().any(|r| r.contains("Armadillo section names")));
+}
+
+/// A lone `.pdata` section (real x64 unwind info) must NOT get promoted to
+/// Armadillo — the 2-of-N gate is the whole point of that vendor's rule.
+#[test]
+fn detector_does_not_upgrade_lone_pdata_section_to_armadillo() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".pdata", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_ne!(
+        report.family,
+        ProtectorFamily::Armadillo,
+        "reasons: {:?}",
+        report.reasons
+    );
+}
+
+/// ASPack section-name path — any single hit is enough (+50).
+#[test]
+fn detector_identifies_aspack_from_dot_aspack_section_name() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".aspack", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::AsPack, "reasons: {:?}", report.reasons);
+    assert!(report.confidence >= 50);
+}
+
+/// Code Virtualizer dispatcher fingerprint hits the whole-file scan. Even
+/// without a matching section name, the 7-byte pattern in section data
+/// should push CodeVirtualizer past MIN_VENDOR_CONFIDENCE.
+#[test]
+fn detector_identifies_code_virtualizer_from_dispatcher_fingerprint() {
+    let mut body = vec![0u8; 32];
+    body.extend_from_slice(&[0xAC, 0x0F, 0xB6, 0xC0, 0xFF, 0x24, 0x87]);
+    body.extend_from_slice(&[0u8; 128]);
+    let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &body);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::CodeVirtualizer,
+        "reasons: {:?}",
+        report.reasons
+    );
+    assert!(report.reasons.iter().any(|r| r.contains("dispatcher fingerprint")));
+}
+
+/// Denuvo signals via a section literally named `.vm` (case-sensitive).
+/// The tool "deliberately refuses" Denuvo — we still identify the family
+/// so callers can print the correct diagnostic.
+#[test]
+fn detector_identifies_denuvo_from_vm_section() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".vm", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::Denuvo, "reasons: {:?}", report.reasons);
+}
+
+/// BattlEye BEDaisy rewraps VMProtect. The `.be0` section bumps VmProtect
+/// directly (+60) so the CLI can still route to `VmpDevirtualizer`
+/// instead of falling into UnknownProtector.
+#[test]
+fn detector_identifies_battleye_bumps_vmprotect_family() {
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".be0", &[0u8; 64]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::VmProtect,
+        "reasons: {:?}",
+        report.reasons
+    );
+    assert!(report.reasons.iter().any(|r| r.contains("BattlEye")));
+}
+
+/// Vanguard/Packman is not in the ProtectorFamily enum — two `.stub`
+/// sections must land on UnknownProtector with the specific reason string.
+#[test]
+fn detector_identifies_vanguard_shell_via_double_stub_sections() {
+    let binary =
+        build_minimal_pe_with_named_sections(true, 0x1_4000_0000, &[(".stub", &[0u8; 32]), (".stub", &[0u8; 32])]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(
+        report.family,
+        ProtectorFamily::UnknownProtector,
+        "reasons: {:?}",
+        report.reasons
+    );
+    assert!(
+        report
+            .reasons
+            .iter()
+            .any(|r| r.contains("Vanguard/Packman shell (.stub x2)")),
+        "reasons: {:?}",
+        report.reasons
+    );
+}
+
+/// Bare fixture must not accidentally fire any of the new vendor rules
+/// (Themida, Enigma, Obsidium, Armadillo, AsPack, CodeVirtualizer,
+/// Denuvo). Guards against pattern tables that would false-positive on
+/// all-zero section bodies.
+#[test]
+fn detector_bare_fixture_fires_no_new_vendor_rule() {
+    let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0u8; 512]);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    for bad in [
+        ProtectorFamily::Themida,
+        ProtectorFamily::EnigmaProtector,
+        ProtectorFamily::Obsidium,
+        ProtectorFamily::Armadillo,
+        ProtectorFamily::AsPack,
+        ProtectorFamily::CodeVirtualizer,
+        ProtectorFamily::Denuvo,
+    ] {
+        assert_ne!(report.family, bad, "bare fixture wrongly upgraded to {bad:?}");
+    }
+}
+
+/// Cross-vendor: fixture combines a Themida section name (+40) with the
+/// literal "VMProtect" string (+15). Themida must win because 40 > 15.
+/// This pins the max-by-points tie-break behaviour so a future rule
+/// re-ordering can't silently change the winner selection.
+#[test]
+fn detector_cross_vendor_highest_score_wins_deterministically() {
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(b"padding");
+    body.extend_from_slice(b"VMProtect"); // +15 to VmProtect
+    body.extend_from_slice(&[0u8; 256]);
+    let binary = build_minimal_pe_with_section_name(true, 0x1_4000_0000, ".themida", &body);
+    let report = ProtectorDetector::detect(&binary).unwrap();
+    assert_eq!(report.family, ProtectorFamily::Themida, "reasons: {:?}", report.reasons);
 }
