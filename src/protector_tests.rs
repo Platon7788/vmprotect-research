@@ -25,8 +25,6 @@ fn family_as_str_covers_all_variants() {
         ProtectorFamily::Obsidium,
         ProtectorFamily::Armadillo,
         ProtectorFamily::AsPack,
-        ProtectorFamily::ExeCryptor,
-        ProtectorFamily::SafEngine,
         ProtectorFamily::Denuvo,
         ProtectorFamily::Upx,
         ProtectorFamily::Mpress,
@@ -214,12 +212,10 @@ fn detector_labels_plain_pe_as_unprotected_or_unknown() {
     }
 }
 
-#[test]
-fn family_key_matches_as_str() {
-    assert_eq!(family_key(ProtectorFamily::VmProtect), "VMProtect");
-    assert_eq!(family_key(ProtectorFamily::Upx), "UPX");
-    assert_eq!(family_key(ProtectorFamily::Unprotected), "Unprotected");
-}
+// Commit V arch debt sweep: the pre-V `family_key(family)` free
+// function was a `pub fn` wrapper over `ProtectorFamily::as_str()`
+// with no callers outside its own test. Deleted along with the
+// wrapper test — `as_str()` is the actual API.
 
 // -------------------------------------------------------------------
 // Score aggregation via the internal `FamilyScore`

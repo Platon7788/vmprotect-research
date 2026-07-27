@@ -55,7 +55,12 @@ pub use opcode_table::{Handler, OpcodeTable};
 pub use pe_loader::{Bitness, PEBinary};
 pub use protector::{ProtectorDetector, ProtectorFamily, ProtectorReport};
 pub use register_roles::{Register, RegisterRoles};
-pub use version::{VersionDetector, VmpVersion, VmpVersionDetail};
+pub use version::{VersionDetector, VmpVersion};
+// `VmpVersionDetail` intentionally NOT re-exported at the crate root
+// (Commit V arch-debt sweep): no external consumer uses it today.
+// Reachable at `vmp_devirt::version::VmpVersionDetail` for the
+// analysis_report path in this file and any future embedder that
+// needs the sub-version hint list.
 pub use xor_key_analyzer::{XorKeyAnalyzer, XorKeyEntry};
 
 /// Main VMP Devirtualizer

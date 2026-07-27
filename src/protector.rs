@@ -63,10 +63,6 @@ pub enum ProtectorFamily {
     Armadillo,
     /// ASPack / ASProtect. Placeholder.
     AsPack,
-    /// ExeCryptor (SoftComplete, legacy). Placeholder.
-    ExeCryptor,
-    /// SafEngine Shielden. Placeholder.
-    SafEngine,
     /// Denuvo Anti-Tamper. Custom `.vm` stack machine — this tool
     /// deliberately refuses (see `RESEARCH_GAPS.md` §1). Placeholder.
     Denuvo,
@@ -102,8 +98,6 @@ impl ProtectorFamily {
             ProtectorFamily::Obsidium => "Obsidium",
             ProtectorFamily::Armadillo => "Armadillo / SoftwarePassport",
             ProtectorFamily::AsPack => "ASPack / ASProtect",
-            ProtectorFamily::ExeCryptor => "ExeCryptor",
-            ProtectorFamily::SafEngine => "SafEngine Shielden",
             ProtectorFamily::Denuvo => "Denuvo Anti-Tamper",
             ProtectorFamily::Upx => "UPX",
             ProtectorFamily::Mpress => "MPRESS",
@@ -127,8 +121,6 @@ impl ProtectorFamily {
                 | ProtectorFamily::Obsidium
                 | ProtectorFamily::Armadillo
                 | ProtectorFamily::AsPack
-                | ProtectorFamily::ExeCryptor
-                | ProtectorFamily::SafEngine
                 | ProtectorFamily::Denuvo
         )
     }
@@ -471,12 +463,3 @@ pub(crate) fn shannon_entropy_for_tests(data: &[u8]) -> f64 {
 #[cfg(test)]
 #[path = "protector_tests.rs"]
 mod tests;
-
-/// Helper used by [`ProtectorFamily::as_str`] callers that need a stable
-/// key (e.g. JSON export). Same string as `as_str`.
-///
-/// Kept as a free function so `ProtectorFamily`'s `Display` impl stays
-/// clean of tokenisation concerns.
-pub fn family_key(family: ProtectorFamily) -> &'static str {
-    family.as_str()
-}

@@ -33,7 +33,10 @@ use crate::Bitness;
 
 #[path = "register_roles_consistency.rs"]
 mod consistency;
-pub use consistency::HandlerCounts;
+// `HandlerCounts` was `pub use consistency::HandlerCounts` pre-V,
+// but the audit found no external consumer. The struct is used only
+// by `consistency`'s own score closures (vsp_score / vip_score /
+// vkey_score), so it stays private to the sibling module.
 
 /// x86 register identifier. r0..r7 on x86; r0..r15 on x64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

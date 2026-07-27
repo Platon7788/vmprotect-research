@@ -32,14 +32,16 @@ use crate::Bitness;
 /// `xor_imm` for VKEY).
 #[derive(Default, Debug, Clone, Copy)]
 #[allow(missing_docs)]
-pub struct HandlerCounts {
+pub(super) struct HandlerCounts {
     pub indirect_load: u32,
     pub indirect_store: u32,
-    pub disp_load: u32,
-    pub disp_store: u32,
     pub inc: u32,
-    pub dec: u32,
     pub xor_imm: u32,
+    // `disp_load` / `disp_store` / `dec` fields were populated pre-V
+    // but no score closure ever read them, generating dead-code
+    // warnings after `HandlerCounts` was demoted from `pub` to
+    // `pub(super)`. Removed here; re-add when a role closure needs
+    // them (e.g. a future CTX-slot voter for VMP 3.7 merged handlers).
 }
 
 /// Minimum fraction of handlers whose per-handler dominant register
@@ -192,15 +194,13 @@ pub(super) fn apply_consistency_gate(
 }
 
 /// Extract the per-register slice for `reg_index` as a
-/// [`HandlerCounts`] snapshot. Cheap: seven u32 copies.
+/// [`HandlerCounts`] snapshot. Cheap: four u32 copies (V arch-debt
+/// sweep dropped the three fields no role closure consumed).
 fn counters_for_reg(c: &Counters, reg_index: usize) -> HandlerCounts {
     HandlerCounts {
         indirect_load: c.indirect_load[reg_index],
         indirect_store: c.indirect_store[reg_index],
-        disp_load: c.disp_load[reg_index],
-        disp_store: c.disp_store[reg_index],
         inc: c.inc[reg_index],
-        dec: c.dec[reg_index],
         xor_imm: c.xor_imm[reg_index],
     }
 }
