@@ -193,8 +193,8 @@ impl PEBinary {
         ]))
     }
 
-    /// Read `count` bytes starting at the PE entry point (AddressOfEntryPoint).
-    pub fn entry_point_bytes(&self, count: usize) -> Result<Vec<u8>> {
+    /// Resolve the PE entry point virtual address (`image_base + AddressOfEntryPoint`).
+    pub fn entry_point_va(&self) -> Result<u64> {
         let pe = self.parse_pe()?;
         let optional_header = pe
             .header
@@ -202,9 +202,14 @@ impl PEBinary {
             .context("PE has no optional header; cannot resolve entry point")?;
         let entry_rva = optional_header.standard_fields.address_of_entry_point;
         let image_base = optional_header.windows_fields.image_base;
-        let entry_va = image_base
+        image_base
             .checked_add(entry_rva as u64)
-            .context("Entry point VA overflow")?;
+            .context("Entry point VA overflow")
+    }
+
+    /// Read `count` bytes starting at the PE entry point (AddressOfEntryPoint).
+    pub fn entry_point_bytes(&self, count: usize) -> Result<Vec<u8>> {
+        let entry_va = self.entry_point_va()?;
         self.read_bytes(entry_va, count)
     }
 

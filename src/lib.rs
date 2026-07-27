@@ -147,6 +147,15 @@ impl VmpDevirtualizer {
         self.version
     }
 
+    /// Override the detected VMP version.
+    ///
+    /// Intended for `--force-version` research scenarios where the detector
+    /// picks Unknown but the analyst knows the sample's true version. Does
+    /// not touch the confidence score — callers that care can inspect it.
+    pub fn force_version(&mut self, version: VmpVersion) {
+        self.version = version;
+    }
+
     /// Get detected VMP version confidence (0-100)
     pub fn version_confidence(&self) -> u8 {
         self.version_confidence

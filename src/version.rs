@@ -99,7 +99,7 @@ impl VersionDetector {
         let layout = SectionLayoutMatcher::classify(has_vmp0, has_vmp1);
 
         let entry_bytes = binary.entry_point_bytes(ENTRY_SCAN_WINDOW).ok();
-        let entry_va = Self::entry_point_va(binary).ok();
+        let entry_va = binary.entry_point_va().ok();
 
         let mut vmp1 = RuleScore::default();
         let mut vmp2 = RuleScore::default();
@@ -250,19 +250,6 @@ impl VersionDetector {
         }
 
         Ok((version, confidence))
-    }
-
-    /// Resolve the entry point virtual address (image base + AddressOfEntryPoint).
-    fn entry_point_va(binary: &PEBinary) -> Result<u64> {
-        let pe = binary.parse_pe()?;
-        let optional_header = pe
-            .header
-            .optional_header
-            .context("PE has no optional header; cannot resolve entry point")?;
-        let image_base = binary.image_base()?;
-        image_base
-            .checked_add(optional_header.standard_fields.address_of_entry_point as u64)
-            .context("Entry point VA overflow")
     }
 
     /// Compute the absolute target VA of a `push imm32; call/jmp rel32` stub.
