@@ -11,7 +11,7 @@ use std::path::Path;
 ///
 /// Determined from the optional header's `Magic` field (0x10B for PE32/x86,
 /// 0x20B for PE32+/x64), surfaced by goblin as `PE::is_64`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Bitness {
     /// 32-bit PE32 image (x86).
     X86,

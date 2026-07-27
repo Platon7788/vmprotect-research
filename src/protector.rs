@@ -142,7 +142,7 @@ impl ProtectorFamily {
 
 /// Detection report: the winning family, a 0-100 confidence, and a list
 /// of the rules that fired (for logging / --verbose).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProtectorReport {
     /// Best-matching family.
     pub family: ProtectorFamily,

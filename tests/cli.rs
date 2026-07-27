@@ -137,6 +137,39 @@ fn e_protector_family_line_is_logged() {
         .stderr(predicate::str::contains("Protector family:"));
 }
 
+/// Commit R: `--export-analysis` must write a single valid JSON file
+/// carrying the unified report shape (protector family, VMP version,
+/// handler classifications, ...), even on a bare fixture where no
+/// dispatch table is ever located (handler_count stays 0 but the
+/// report itself must still serialise cleanly).
+#[test]
+fn export_analysis_produces_valid_json() {
+    let fixture = write_minimal_pe(0x1_4000_0000, 0x1000, &[0x90; 32]);
+    let out_dir = tempfile::tempdir().expect("create tempdir");
+    let out_path = out_dir.path().join("analysis.json");
+
+    Command::cargo_bin("vmp_devirt")
+        .expect("cargo bin exists")
+        .arg(fixture.path())
+        .args(["--force-version", "vmp35"])
+        .arg("--export-analysis")
+        .arg(&out_path)
+        .assert()
+        .success();
+
+    let contents = std::fs::read_to_string(&out_path).expect("analysis report file must exist");
+    let json: serde_json::Value = serde_json::from_str(&contents).expect("analysis report must be valid JSON");
+
+    assert_eq!(json["vmp_version"], serde_json::json!("Vmp35"));
+    assert!(json.get("protector").is_some(), "report must include a protector field");
+    assert!(
+        json.get("handler_classifications").is_some(),
+        "report must include handler_classifications"
+    );
+    assert_eq!(json["handler_count"], serde_json::json!(0));
+    assert_eq!(json["semantic_coverage_percent"], serde_json::json!(0.0));
+}
+
 #[test]
 fn f1_vip_defaults_to_pe_entry_point() {
     // image_base 0x00400000 (classic PE32+ non-ASLR base) + entry rva

@@ -458,3 +458,59 @@ fn deprecated_push_never_fires_when_pushimm_would_match() {
         Some(VmpSemantic::Push)
     );
 }
+
+// -----------------------------------------------------------------
+// Commit R: confidence scoring.
+// -----------------------------------------------------------------
+
+/// Add requires ALL FOUR of its primitives (load-indirect, add-reg-reg,
+/// PUSHFQ, store-indirect) to fire -- the Commit R spec's "90+" tier.
+/// Vsetvsp is the explicit "40" catch-all. A stricter matcher must
+/// always outscore the catch-all on their own canonical bodies.
+#[test]
+fn confidence_scoring_reflects_matcher_strength() {
+    let add_body = [
+        0x49, 0x8B, 0x06, 0x49, 0x8B, 0x4E, 0x08, 0x48, 0x01, 0xC8, 0x9C, 0x49, 0x89, 0x06, 0xFF, 0x25, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+    let vsetvsp_body = [0x4D, 0x8B, 0x36, 0x90, 0x90, 0x90];
+
+    let add_semantic = SemanticMatcher::classify(&add_body, Bitness::X64).expect("add shape must match");
+    let vsetvsp_semantic = SemanticMatcher::classify(&vsetvsp_body, Bitness::X64).expect("vsetvsp shape must match");
+
+    assert_eq!(add_semantic, VmpSemantic::Add);
+    assert_eq!(vsetvsp_semantic, VmpSemantic::Vsetvsp);
+
+    let add_confidence = confidence_for(add_semantic);
+    let vsetvsp_confidence = confidence_for(vsetvsp_semantic);
+
+    assert!(
+        add_confidence >= 90,
+        "Add (4-primitive match) must score in the 90+ tier, got {add_confidence}"
+    );
+    assert_eq!(vsetvsp_confidence, 40, "Vsetvsp catch-all must score exactly 40");
+    assert!(
+        add_confidence > vsetvsp_confidence,
+        "Add ({add_confidence}) must outscore the Vsetvsp catch-all ({vsetvsp_confidence})"
+    );
+}
+
+#[test]
+fn confidence_for_is_zero_only_via_handler_classification_default() {
+    // confidence_for itself is defined over VmpSemantic (never None), so
+    // this guards the OTHER half of the "default 0 when vmp_semantic is
+    // None" contract: HandlerClassification's own construction path,
+    // covered in `handler_classifier::tests`. Here we just pin that every
+    // recognised semantic gets a strictly positive score -- 0 is reserved
+    // for "no match at all", never a real matcher's confidence.
+    for semantic in [
+        VmpSemantic::Pop,
+        VmpSemantic::Push,
+        VmpSemantic::Add,
+        VmpSemantic::Vsetvsp,
+        VmpSemantic::Rdtsc,
+        VmpSemantic::Vnop,
+    ] {
+        assert!(confidence_for(semantic) > 0, "{semantic:?} must have a positive score");
+    }
+}

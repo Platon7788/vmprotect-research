@@ -27,6 +27,13 @@ pub struct HandlerClassification {
     /// [`crate::handler_semantic`] for the matcher and enum.
     #[serde(default)]
     pub vmp_semantic: Option<VmpSemantic>,
+    /// Confidence (0-100) that `vmp_semantic` is correct, from
+    /// [`crate::handler_semantic::confidence_for`]. `0` whenever
+    /// `vmp_semantic` is `None` -- there is nothing to be confident
+    /// about. `#[serde(default)]` lets pre-Commit-R JSON dumps (which
+    /// never had this field) deserialize with the same 0 fallback.
+    #[serde(default)]
+    pub vmp_semantic_confidence: u8,
 }
 
 /// Handler classifier
@@ -42,6 +49,7 @@ impl HandlerClassifier {
                 size: 0,
                 confidence: 0,
                 vmp_semantic: None,
+                vmp_semantic_confidence: 0,
             });
         }
 
@@ -59,6 +67,7 @@ impl HandlerClassifier {
                     size: 0,
                     confidence: 0,
                     vmp_semantic: None,
+                    vmp_semantic_confidence: 0,
                 });
             }
         };
@@ -86,6 +95,9 @@ impl HandlerClassifier {
         // fallback so the two layers can disagree without either
         // silently masking the other -- consumers see both.
         let vmp_semantic = SemanticMatcher::classify(&cleaned, bitness);
+        // Confidence tracks the matcher, not the x86-level `confidence`
+        // above -- 0 when no VMP-semantic fingerprint fired at all.
+        let vmp_semantic_confidence = vmp_semantic.map(crate::handler_semantic::confidence_for).unwrap_or(0);
 
         Ok(HandlerClassification {
             va: handler_va,
@@ -93,6 +105,7 @@ impl HandlerClassifier {
             size,
             confidence,
             vmp_semantic,
+            vmp_semantic_confidence,
         })
     }
 
@@ -309,6 +322,7 @@ impl HandlerClassifier {
                         size: 0,
                         confidence: 0,
                         vmp_semantic: None,
+                        vmp_semantic_confidence: 0,
                     });
                 }
             }
@@ -418,6 +432,7 @@ mod tests {
             size: 3,
             confidence: 85,
             vmp_semantic: None,
+            vmp_semantic_confidence: 0,
         };
         assert!(c.vmp_semantic.is_none());
     }
@@ -430,6 +445,7 @@ mod tests {
             size: 4,
             confidence: 85,
             vmp_semantic: Some(VmpSemantic::Pop),
+            vmp_semantic_confidence: 70,
         };
         let json = serde_json::to_string(&c).expect("serialize");
         assert!(json.contains("\"vmp_semantic\":\"Pop\""));

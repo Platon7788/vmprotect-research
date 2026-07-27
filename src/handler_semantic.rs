@@ -202,6 +202,99 @@ pub enum VmpSemantic {
     Unknown,
 }
 
+/// Confidence score (0-100) for a recognised [`VmpSemantic`] category,
+/// reflecting how strictly the matcher that produced it fired.
+///
+/// Each `VmpSemantic` variant is produced by exactly one `is_*_shape`
+/// (or single-opcode `contains_pair`) check in `classify()`, so the
+/// variant itself stands in for the matcher identity -- no separate
+/// `MatcherId` type is needed. Scores are grouped by how many
+/// independent primitives the matcher requires ALL of before firing:
+/// more primitives -> less likely to be a coincidental byte match ->
+/// higher confidence. The `Vsetvsp` catch-all (one primitive PLUS five
+/// negative guards, but conceptually "nothing more specific matched")
+/// is deliberately the lowest score per Commit R's spec.
+///
+/// Variants never returned by `classify()` today (`Str`, `Ret`,
+/// `Vemit`, `Vexec`, `Vunk`, `Unknown`) still get a defensible score so
+/// the function stays exhaustive against future matcher additions.
+pub fn confidence_for(semantic: VmpSemantic) -> u8 {
+    match semantic {
+        // Single distinctive opcode fingerprint, no load/store shape
+        // needed at all (`0F 31`, `0F A2`, `0F 20 /0|/3`).
+        VmpSemantic::Rdtsc | VmpSemantic::Cpuid | VmpSemantic::VpushCr0 | VmpSemantic::VpushCr3 => 95,
+
+        // Add: the canonical "requires ALL four primitives" shape from
+        // the Commit R spec (load-indirect + add-reg-reg + PUSHFQ +
+        // store-indirect).
+        VmpSemantic::Add => 95,
+
+        // Shifts/rotates: same four-primitive shape as Add (load +
+        // op + PUSHFQ + store).
+        VmpSemantic::Shl
+        | VmpSemantic::Shr
+        | VmpSemantic::Shld
+        | VmpSemantic::Shrd
+        | VmpSemantic::Rcl
+        | VmpSemantic::Rcr => 90,
+
+        // Vnop: seven guards (one positive + six negative) -- very
+        // narrow, but a pure negative-guard shape reads as slightly
+        // less certain than a positive four-primitive match.
+        VmpSemantic::Vnop => 90,
+
+        // Single-window structural check (POPFQ/POPAD near a RET).
+        VmpSemantic::Vmexit => 90,
+
+        // Popreg: Pop-shape (three primitives) PLUS an exact
+        // single-store/disp8-range refinement -- the tightest of the
+        // Push/Pop family.
+        VmpSemantic::Popreg => 88,
+
+        // Vjmp: four primitives (load + adjust + indirect-jmp + two
+        // negative store guards).
+        VmpSemantic::Vjmp => 85,
+
+        // Lockor: LOCK prefix + specific opcode + ModR/M shape --
+        // three effective conditions.
+        VmpSemantic::Lockor => 85,
+
+        // Mul/Imul/Div/Idiv: three primitives (load + F7-/n-range op
+        // + store).
+        VmpSemantic::Mul | VmpSemantic::Imul | VmpSemantic::Div | VmpSemantic::Idiv => 85,
+
+        // Str: same three-primitive shape as Ldd, plus a negative
+        // guard; never actually emitted by classify() (Ldd wins) but
+        // scored consistently with it.
+        VmpSemantic::Ldd | VmpSemantic::Str => 80,
+
+        // Nand/Nor: two primitives (>=2 NOT ops AND the paired
+        // AND/OR reg-reg).
+        VmpSemantic::Nand | VmpSemantic::Nor => 80,
+
+        // PushImm: three primitives plus a negative load-disp guard.
+        VmpSemantic::PushImm => 78,
+
+        // Pushreg/Push: three primitives (load + adjust + store),
+        // the base tier the Commit R spec calls out as "70".
+        VmpSemantic::Pushreg | VmpSemantic::Push | VmpSemantic::Pop => 70,
+
+        // Popf: single opcode presence check, but common enough as a
+        // stray byte that it doesn't earn the 90+ single-fingerprint
+        // tier above.
+        VmpSemantic::Popf => 70,
+
+        // Vsetvsp: the catch-all explicitly called out in the spec.
+        VmpSemantic::Vsetvsp => 40,
+
+        // Not produced by classify() today -- defensive defaults for
+        // future matcher additions.
+        VmpSemantic::Ret | VmpSemantic::Vemit | VmpSemantic::Vexec => 50,
+        VmpSemantic::Popstk | VmpSemantic::Pushstk => 50,
+        VmpSemantic::Vunk | VmpSemantic::Unknown => 30,
+    }
+}
+
 /// Stateless pattern-based semantic classifier.
 pub struct SemanticMatcher;
 

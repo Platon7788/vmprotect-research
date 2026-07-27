@@ -282,6 +282,56 @@ impl VmpDevirtualizer {
         Ok(())
     }
 
+    /// Build the unified analysis report (Commit R): protector family +
+    /// VMP version + dispatch table + register roles + every handler
+    /// classification in one serialisable snapshot, replacing the need
+    /// to cross-reference `--export-opcodes` and `--export-handlers`
+    /// separately.
+    ///
+    /// Re-runs [`ProtectorDetector::detect`] rather than caching a
+    /// `ProtectorReport` on `VmpDevirtualizer` itself: family detection
+    /// is a cheap section/byte scan and every existing call site (the
+    /// CLI) already runs it once before construction anyway, so adding
+    /// a second field here would just be a second copy of the same
+    /// data to keep in sync.
+    pub fn analysis_report(&self) -> Result<AnalysisReport> {
+        let protector = ProtectorDetector::detect(&self.binary).context("protector detection")?;
+        let bitness = self.binary.bitness().context("determine PE bitness")?;
+
+        let handler_count = self.handler_classifications.len();
+        let matched = self
+            .handler_classifications
+            .iter()
+            .filter(|c| c.vmp_semantic.is_some())
+            .count();
+        let semantic_coverage_percent = if handler_count == 0 {
+            0.0
+        } else {
+            (matched as f64 / handler_count as f64) * 100.0
+        };
+
+        Ok(AnalysisReport {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            binary_path: self.binary.path.clone(),
+            bitness,
+            protector,
+            vmp_version: self.version,
+            vmp_version_confidence: self.version_confidence,
+            // No `VmpVersionDetail`-style per-rule hint list exists yet
+            // (see AUDIT_REPORT.md future work) -- left empty rather
+            // than duplicating `VersionDetector::detect`'s internal
+            // reason strings, which aren't exposed on its public
+            // `(VmpVersion, u8)` return type today.
+            vmp_version_hints: Vec::new(),
+            dispatch_table_va: self.dispatch_table_va.map(|va| format!("0x{:x}", va)),
+            handler_count,
+            handler_classifications: self.handler_classifications.clone(),
+            register_roles: self.register_roles,
+            crypto_scheme: CryptoScheme::for_version(self.version).as_str().to_string(),
+            semantic_coverage_percent,
+        })
+    }
+
     /// Decode instruction at VIP address.
     ///
     /// `cryptor` must be the same `OpcodeCryptor` instance used for every
@@ -353,6 +403,54 @@ impl VmpDevirtualizer {
     }
 }
 
+/// Unified analysis export (Commit R): every layer of the pipeline's
+/// findings in one serialisable snapshot, replacing the older pattern
+/// of dumping `--export-opcodes` and `--export-handlers` separately
+/// and leaving callers to line the two files up by hand.
+///
+/// Built via [`VmpDevirtualizer::analysis_report`]. `#[serde(default)]`
+/// is deliberately NOT sprinkled across every field here the way it is
+/// on `HandlerClassification::vmp_semantic_confidence` -- this whole
+/// type is new in Commit R, so there is no pre-existing on-disk shape
+/// to stay backward-compatible with.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AnalysisReport {
+    /// This crate's version (`CARGO_PKG_VERSION`), so a report on disk
+    /// can be traced back to the tool build that produced it.
+    pub tool_version: String,
+    /// Path to the analysed binary, as passed to `VmpDevirtualizer::new`.
+    pub binary_path: String,
+    /// Target architecture (x86 / x64) of the loaded PE image.
+    pub bitness: Bitness,
+    /// Protector-family verdict (VMProtect / Themida / ... / Unprotected).
+    pub protector: ProtectorReport,
+    /// Detected VMP version (`Unknown` when the sample isn't recognised
+    /// or `--force-version` hasn't been applied).
+    pub vmp_version: VmpVersion,
+    /// 0-100 confidence in `vmp_version`.
+    pub vmp_version_confidence: u8,
+    /// Per-rule version-detection hints. Always empty today -- see
+    /// `analysis_report`'s doc comment for why.
+    pub vmp_version_hints: Vec<String>,
+    /// Dispatch table VA as a `0x`-prefixed hex string, or `None` when
+    /// no dispatch table was located.
+    pub dispatch_table_va: Option<String>,
+    /// Number of entries in `handler_classifications`.
+    pub handler_count: usize,
+    /// Every extracted handler's classification, x86-level and
+    /// VMP-semantic.
+    pub handler_classifications: Vec<HandlerClassification>,
+    /// VIP/VSP/VKEY register-role vote.
+    pub register_roles: RegisterRoles,
+    /// Stable name of the operand-decryption scheme picked for
+    /// `vmp_version` (see [`CryptoScheme::for_version`]).
+    pub crypto_scheme: String,
+    /// Percentage of `handler_classifications` that got a non-`None`
+    /// `vmp_semantic` (i.e. `matched / handler_count * 100`). `0.0`
+    /// when `handler_count` is `0`.
+    pub semantic_coverage_percent: f64,
+}
+
 /// Parse a hex string into a `u64`, accepting an optional `0x`/`0X` prefix.
 ///
 /// Used by the CLI for both `--vip` and `--dispatch-rva` so both flags share
@@ -419,5 +517,75 @@ mod tests {
         assert!(parse_hex_rva("not-hex").is_err());
         assert!(parse_hex_rva("0xzz").is_err());
         assert!(parse_hex_rva("").is_err());
+    }
+
+    /// Commit R: `AnalysisReport` must round-trip through JSON exactly
+    /// as `HandlerClassification` and friends already do -- this pins
+    /// the whole aggregate export, not just its constituent types.
+    ///
+    /// Built by hand (not `VmpDevirtualizer::new`, which needs a real
+    /// on-disk file) since this `mod tests` is a child of `lib`'s own
+    /// module and can see every private field directly.
+    #[test]
+    fn analysis_report_serialises_and_deserialises() {
+        use crate::pe_loader::test_util::build_minimal_pe;
+
+        let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0x90u8; 32]);
+        let devirt = VmpDevirtualizer {
+            binary,
+            version: VmpVersion::Vmp2,
+            version_confidence: 80,
+            opcode_table: OpcodeTable::new(),
+            dispatch_table_va: Some(0x1_4000_1000),
+            handler_classifications: vec![HandlerClassification {
+                va: 0x1_4000_1000,
+                handler_type: "MOV_REG_REG".to_string(),
+                size: 3,
+                confidence: 85,
+                vmp_semantic: Some(VmpSemantic::Add),
+                vmp_semantic_confidence: 95,
+            }],
+            register_roles: RegisterRoles::default(),
+            alu_reconstructor: ALUReconstructor::new(),
+        };
+
+        let report = devirt.analysis_report().expect("analysis_report must not error");
+        assert_eq!(report.vmp_version, VmpVersion::Vmp2);
+        assert_eq!(report.handler_count, 1);
+        assert_eq!(report.dispatch_table_va.as_deref(), Some("0x140001000"));
+        assert_eq!(report.semantic_coverage_percent, 100.0);
+        assert_eq!(report.crypto_scheme, "Vmp2Rolling");
+
+        let json = serde_json::to_string_pretty(&report).expect("serialize AnalysisReport");
+        let back: AnalysisReport = serde_json::from_str(&json).expect("deserialize AnalysisReport");
+        assert_eq!(back.vmp_version, report.vmp_version);
+        assert_eq!(back.handler_classifications.len(), 1);
+        assert_eq!(back.handler_classifications[0].vmp_semantic, Some(VmpSemantic::Add));
+        assert_eq!(back.handler_classifications[0].vmp_semantic_confidence, 95);
+    }
+
+    /// `semantic_coverage_percent` must be `0.0`, not NaN, when there
+    /// are zero handlers to divide by (e.g. dispatch-table location
+    /// failed entirely).
+    #[test]
+    fn analysis_report_handles_zero_handlers_without_nan() {
+        use crate::pe_loader::test_util::build_minimal_pe;
+
+        let binary = build_minimal_pe(true, 0x1_4000_0000, 0x1000, &[0x90u8; 32]);
+        let devirt = VmpDevirtualizer {
+            binary,
+            version: VmpVersion::Unknown,
+            version_confidence: 0,
+            opcode_table: OpcodeTable::new(),
+            dispatch_table_va: None,
+            handler_classifications: Vec::new(),
+            register_roles: RegisterRoles::default(),
+            alu_reconstructor: ALUReconstructor::new(),
+        };
+
+        let report = devirt.analysis_report().expect("analysis_report must not error");
+        assert_eq!(report.handler_count, 0);
+        assert_eq!(report.semantic_coverage_percent, 0.0);
+        assert!(report.dispatch_table_va.is_none());
     }
 }

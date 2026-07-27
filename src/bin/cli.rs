@@ -78,6 +78,12 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     export_handlers: Option<PathBuf>,
 
+    /// Export the unified analysis report (protector family + VMP
+    /// version + dispatch table + register roles + all handler
+    /// classifications) to a single pretty-printed JSON file.
+    #[arg(long, value_name = "FILE")]
+    export_analysis: Option<PathBuf>,
+
     /// Optional dispatch-table RVA hint (hex, e.g. 0x12340). If omitted or
     /// invalid, the tool scans candidate sections.
     #[arg(long, value_name = "RVA")]
@@ -219,6 +225,18 @@ fn main() -> anyhow::Result<ExitCode> {
     // Export handler classifications if requested
     if let Some(export_path) = args.export_handlers {
         devirt.export_handler_classifications(&export_path.to_string_lossy())?;
+    }
+
+    // Export the unified analysis report if requested. Runs after the
+    // whole detection/extraction pipeline above (family/version/
+    // dispatch/handlers/roles are already populated on `devirt` by
+    // this point), so the report reflects the complete run rather than
+    // a partial snapshot.
+    if let Some(export_path) = args.export_analysis {
+        let report = devirt.analysis_report().context("build unified analysis report")?;
+        let json = serde_json::to_string_pretty(&report).context("serialize analysis report")?;
+        std::fs::write(&export_path, json).context("write analysis report file")?;
+        info!("Analysis report exported to: {}", export_path.display());
     }
 
     // F2: refuse to devirtualize a binary that shows no signs of being VMP

@@ -15,7 +15,7 @@ use crate::PEBinary;
 use anyhow::{Context, Result};
 
 /// Supported VMP versions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum VmpVersion {
     /// VMProtect 1.x
     Vmp1,

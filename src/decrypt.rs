@@ -86,6 +86,20 @@ impl CryptoScheme {
             VmpVersion::Unknown => CryptoScheme::Placeholder,
         }
     }
+
+    /// Stable string name for each variant, used by the unified
+    /// analysis-export (Commit R) so the scheme choice JSON-serialises
+    /// as a plain string instead of requiring `CryptoScheme` itself to
+    /// derive `serde::Serialize` (which would expose the internal
+    /// variant names as a public wire format).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CryptoScheme::None => "None",
+            CryptoScheme::Placeholder => "Placeholder",
+            CryptoScheme::Vmp2Rolling => "Vmp2Rolling",
+            CryptoScheme::Vmp3PerHandler => "Vmp3PerHandler",
+        }
+    }
 }
 
 /// Internal state carrier — one variant per [`CryptoScheme`].
