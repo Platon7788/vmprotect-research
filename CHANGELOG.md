@@ -7,7 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+`Cargo.toml` still reads `0.1.0` — not bumped by this sweep. Commits `42cb238` (E)
+through `a4e135b` (V), documented in full in `AUDIT_REPORT.md` §1c and
+`RESEARCH_GAPS.md` §7.
+
+### Added
+
+- `ProtectorFamily` enum + `ProtectorDetector` + class-level "some protector"
+  gate (entropy / W+X / stripped-IAT / EP-outside-`.text`) (`42cb238`, E).
+- 10 vendor byte-table matchers: Themida/WinLicense, Enigma, Obsidium,
+  Armadillo, ASPack, Code Virtualizer, Denuvo (detect + refuse), BattlEye,
+  Vanguard, plus 5 compressor families (UPX/MPRESS/Petite/PECompact/Upack)
+  (`94f1af8` F, `42cb238` E).
+- Extended `VmpSemantic` matchers from 8 to the full 35/35 taxonomy
+  (`505bfed` G, `5f42752` L, `59908c6` O).
+- `JunkStripper` peephole passes Groups A-G (dead-store elimination, constant
+  folding, backward liveness) with fixed-point iteration (`8bd4805`/`ea49498`
+  H, `6a5d768` P).
+- Structural VMP dispatcher fingerprint scanner for renamed-section VMP
+  (BattlEye BEDaisy, EAC) (`832ffc4`, I).
+- `register_roles` module: VIP/VSP/VKEY voter with a cross-handler
+  consistency gate (`92c04af` K, `0c10fdd` Q).
+- `CryptoScheme` per-VMP-version dispatch (`None`/`Placeholder`/
+  `Vmp2Rolling`/`Vmp3PerHandler`) (`796da51`, M).
+- `--features real-samples` harness: `tests/samples.rs` + `tests/fixtures/`
+  scaffold (`d320477`, N).
+- `--features synthetic-samples` E2E harness: `src/synthetic_sample.rs` PE
+  generator + `tests/synthetic.rs`, 4 end-to-end tests validating the full
+  pipeline structurally without real binaries (`8932073`, S).
+- `--export-analysis <FILE>` unified JSON export: family + version +
+  confidence + dispatch + register roles + handler classifications + crypto
+  scheme + coverage % (`b1c3ccd`, R).
+- Confidence scoring on `VmpSemantic` classifications (`b1c3ccd`, R).
+- `VmpVersionDetail` with sub-version hints for VMP 3.6+/3.8+/3.10.5
+  (`0c10fdd`, Q).
+- `EXIT_UNSUPPORTED_FAMILY` = 3 for detected-but-unsupported vendor families
+  (`42cb238`, E).
+- `sanitise_section_name` log-injection sanitiser (`337a4fb`, J; extended to
+  `protector_signals.rs` in `738bbf9`, T).
+
+### Changed
+
+- **BREAKING**: `HandlerClassification` gains a `vmp_semantic_confidence: u8`
+  field (`b1c3ccd`, R).
+- Version detector tiebreak made deterministic — ties are now resolved by
+  candidate array order instead of `Iterator::max_by`'s implicit
+  "last of equals," and logged when they occur (`337a4fb`, J).
+- `has_xor_reg_imm` broadened from imm8-only to imm32 + reg-reg XOR forms
+  (`738bbf9`, T).
+- `Ret` / `Vemit` confidence tiers corrected (`Ret` 90, `Vemit` 88, both above
+  `Vjmp`'s 85) (`738bbf9`, T).
+- `handler_agreement` denominator now counts only voting handlers, not
+  silent ones (`738bbf9`, T).
+- `Vsetvsp` shape documented as unreachable on live handlers once `Vnop`
+  runs first (`738bbf9`, T).
+
+### Fixed
+
+- Log-injection at `protector_signals.rs:138` — the structural dispatcher
+  scanner added in `I` did not route section names through
+  `sanitise_section_name` (`738bbf9`, T).
+- `has_xor_reg_imm` was narrower than intended (imm8-only) (`738bbf9`, T).
+- `Ret`/`Vemit`/`Popstk`/`Pushstk` confidence scoring was inverted
+  (`738bbf9`, T).
+- Register-role consistency denominator was too strict (`738bbf9`, T).
+- Two tautological detector tests replaced with real behavioral assertions
+  (`267607b`, U).
+- Duplicate `junk_stripper` test removed (`267607b`, U).
+- Synthetic-sample harness `FROZEN_ESSENTIALS` floor tightened (`267607b`, U).
+
+### Removed
+
+- `ProtectorFamily::ExeCryptor` / `SafEngine` variants — neither ever emitted
+  a detection rule (`a4e135b`, V).
+- `pub fn family_key` — thin wrapper over `as_str` (`a4e135b`, V).
+- Crate-root re-exports of `VmpVersionDetail` and `HandlerCounts` — now
+  internal-only (`a4e135b`, V).
+- GitHub Actions CI (session 2026-07-27) — project is local-only.
+
+### Test quality
+
+- +204 tests since [0.2.0]: 111 → 315 default (`cargo test --all-targets`);
+  322 under `--features synthetic-samples --all-targets`.
+- Two tautologies replaced with real behavioral assertions.
+- One duplicate test removed.
+- Synthetic-sample floor tightened (`FROZEN_ESSENTIALS`).
 
 ## [0.2.0] - 2026-07-27 (planned — not yet tagged; `Cargo.toml` still reads `0.1.0`)
 
@@ -66,5 +150,5 @@ Commits: `b95246d`, `06ae816`, `64288a4`, `e586638`, `e5fa959`, `5744974`. Full 
 Commits before `b95246d` (audit-driven overhaul `cbb6186`, CI/supply-chain hardening `d81cfbd`, and
 everything prior) predate this changelog and are documented only in `AUDIT_REPORT.md` §1 / §1a.
 
-[Unreleased]: https://github.com/Platon7788/vmprotect-research/compare/5744974...HEAD
+[Unreleased]: https://github.com/Platon7788/vmprotect-research/compare/a4e135b...HEAD
 [0.2.0]: https://github.com/Platon7788/vmprotect-research/compare/cbb6186...5744974

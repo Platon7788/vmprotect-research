@@ -1,6 +1,6 @@
 # VMP Devirtualizer — Audit Report
 
-**Дата:** 2026-07-26 (актуализировано 2026-07-27)
+**Дата:** 2026-07-26 (актуализировано 2026-07-27 после T/U/V audit remediation)
 **Ветка:** main · **Rust:** 1.97.1 · **Проект:** vmp_devirt 0.1.0
 
 ---
@@ -9,15 +9,15 @@
 
 | Метрика | Значение |
 |---|---|
-| Строк Rust | 4 829 (`wc -l src/*.rs src/bin/*.rs`, 2026-07-27) |
-| Модулей | 13 (`src/handler_semantic.rs` добавлен в `06ae816`) |
-| Тестов | 111 pass / 0 fail — 105 lib + 1 bin + 5 integration (`cargo test --all-targets`, было 66/0, до того 16/0) |
-| Clippy warnings | 0 (`cargo clippy --all-targets`) |
+| Строк Rust | 14 102 (`wc -l src/*.rs src/bin/*.rs`, 2026-07-27, после Commit V) |
+| Модулей | 39 файлов (`src/*.rs` + `src/bin/cli.rs`; было 13 на момент 2026-07-26) |
+| Тестов | 307 lib unit + 1 bin + 7 integration = **315 total** (`cargo test --all-targets`); **322 total** (310 lib + 1 bin + 7 integration + 4 synthetic e2e) под `cargo test --features synthetic-samples --all-targets` |
+| Clippy warnings | 0 (`cargo clippy --all-targets --all-features`) |
 | Build (dev + release) | ✓ |
 | CI | ⛔ отключён — проект локальный, GitHub Actions удалён (2026-07-27); все 4 gate'а (`build`/`test`/`clippy -D warnings`/`fmt --check`) обязаны прогоняться локально перед коммитом |
 | Deps latest | ✓ (goblin 0.10.7, clap 4.6.4, serde 1.0.229, serde_json 1.0.151, anyhow 1.0.104, log 0.4.33, env_logger 0.11.11) |
 
-> Строки/модули/тесты в этой таблице — актуализировано 2026-07-27 (см. раздел 1b). Остальной текст ниже сохранён как исторический след сессии 2026-07-26 и помечен там, где он устарел.
+> Строки/модули/тесты в этой таблице — актуализировано 2026-07-27 после T/U/V audit remediation (см. раздел 1b для полной коммит-истории E→V). Остальной текст ниже сохранён как исторический след сессии 2026-07-26 и помечен там, где он устарел.
 
 **Быстрые фиксы применены** (см. раздел 1). Начиная с той сессии раздел 1 также включал архитектурные фиксы C1/C3/C4/X1 и инфраструктурные Q6/Q7/Q10/Q11, ранее числившиеся в разделе 2 — они landed в коммитах `cbb6186` (audit-driven overhaul: real detectors, dual-bitness, hardening) и `d81cfbd` (CI + supply-chain security) на `main`. С тех пор landed ещё 6 коммитов (`b95246d`, `06ae816`, `64288a4`, `e586638`, `e5fa959`, `5744974`) — см. **раздел 1b** для того, что они закрыли. **Остальное** — в разделе 2 (что доделывать).
 
@@ -77,7 +77,36 @@
 | `e5fa959` (Commit B — test quality) | Удалён тавтологичный `test_find_extractor_script`, переписан на реальный assert. Ужесточены assertion'ы `assert_ne!(_, Some(X))` → `assert_eq!(_, None)` (мисклассификации больше не проходят молча). `test_crc_update` пиннит точную формулу `crc*31 + val`. Round-trip тесты для `decrypt_value_u32`/`decrypt_value_u64`. |
 | `5744974` (Commit C — architecture cleanup) | Дедуп PE-фикстуры: `pe_loader::test_util::build_minimal_pe` теперь общий builder (был скопирован в 3 местах). `alu::HandlerContext` и `XorKeyAnalyzer::new`+поля удалены (dead public API); `XorKeyAnalyzer` — bare marker type. Crate-root re-export `DispatchExtractorPy`/`DispatchEntry` убран (доступ через `vmp_devirt::dispatch_extractor_py::*`, подготовка к Q15). `VmpDevirtualizer::force_version`/`looks_like_vmp` доведены до финального вида. |
 
-**Итог:** Дни 1-5 недельного плана (раздел 5) закрыты целиком; отдельно прошёл audit-driven проход (7 correctness bugs + test-quality sweep + architecture cleanup) поверх них. Тестов: 66 → 111.
+**Итог (на 5744974):** Дни 1-5 недельного плана (раздел 5) закрыты целиком; отдельно прошёл audit-driven проход (7 correctness bugs + test-quality sweep + architecture cleanup) поверх них. Тестов: 66 → 111.
+
+---
+
+## 1c. Коммиты E → V (research-gap remediation + audit-driven correctness/quality sweep) ✓
+
+После раздела 1b landed ещё 18 коммитов на `main`, закрывающие практически весь `RESEARCH_GAPS.md` (§0, §1, §7) плюс собственный трёхфазный аудит (T/U/V) поверх них. Один ряд на коммит, актуализировано 2026-07-27.
+
+| Коммит | Что закрыто |
+|---|---|
+| `42cb238` (E) | `ProtectorFamily` enum-фундамент + class-level gate (entropy / W+X / stripped-IAT / EP-outside-`.text`) + VMP-version строковые маркеры (`ZwProtectVirtualMemory`) + 5 compressor-семейств (UPX/MPRESS/Petite/PECompact/Upack). Закрывает RESEARCH_GAPS §0 "no class-level gate" и roadmap #1/#3. |
+| `94f1af8` (F) | 9 vendor byte-table matchers в новом `src/protector_matchers.rs`: Themida/WinLicense, Enigma, Obsidium, Armadillo, ASPack, Code Virtualizer (dispatcher fingerprint `AC 0F B6 C0 FF 24 87`), Denuvo (detect+refuse), BattlEye, Vanguard. Закрывает roadmap #2. |
+| `505bfed` (G) | 8 P0 VMP-семантических matcher'ов: `Add`, `Ldd`, `PushImm`/`PushReg`-split, `Popreg`, `Popf`, `Vsetvsp` + ordering-дисциплина в `classify()`. Закрывает roadmap #4 (первая половина). |
+| `8bd4805` + `ea49498` (H) | `JunkStripper` peephole pre-pass подключён в `handler_classifier` перед семантической классификацией; fix-up `ea49498` перенацелил regression-тесты на `Popreg` после G. Закрывает roadmap #5 (первая половина). |
+| `832ffc4` (I) | Структурный VMP-dispatcher fingerprint (`protector_matchers::has_{mov_indirect_load,xor_reg_imm,add_reg_mem,indirect_jmp_ff4}` + `protector_signals::scan_rx_sections_for_dispatcher`) — детектирует renamed-section VMP (BattlEye BEDaisy, EAC) без литеральных секций. Закрывает roadmap #6. |
+| `337a4fb` (J) | Audit-debt sweep: детерминированный version-detector tiebreak (`src/version.rs`, `.rev()` на `max_by` + explicit tie-log), `sanitise_section_name` log-injection санитайзер (`src/pe_loader.rs`, вызывается из `dispatch_table.rs` и `lib.rs`), `saturating_add`/`checked_add` арифметика в `dispatch_table.rs`/`xor_key_analyzer.rs`/`dispatch_extractor_py.rs`. Закрывает все три пункта §"Новые pending-пункты" из раздела 3 (см. ниже). |
+| `92c04af` (K) | `register_roles.rs` — pattern-heuristic voter для VIP/VSP/VKEY канонический ролей (dominance-over-runner-up гейт). Закрывает roadmap #7 (первая половина). |
+| `5f42752` (L) | +14 семантических matcher'ов: `Mul`/`Imul`/`Div`/`Idiv`, `Shl`/`Shr`/`Shld`/`Shrd`/`Rcl`/`Rcr`, `Lockor`, `VpushCr0`/`VpushCr3`, `Vnop`. |
+| `796da51` (M) | `CryptoScheme` enum (`None`/`Placeholder`/`Vmp2Rolling`/`Vmp3PerHandler`) с `for_version()`-диспетчером в `src/decrypt.rs`; `Vmp2Rolling`/`Vmp3PerHandler` — реальные VMP-цепочки из public write-ups (back.engineering, r0da, vxcall). Закрывает roadmap #8. |
+| `d320477` (N) | `--features real-samples` харнесс: `tests/samples.rs` + `tests/fixtures/{vmp1,vmp2,vmp30,vmp35,vmp36,non_vmp}/` scaffold; empty-tree-safe (skip, не fail). Закрывает roadmap #9 (real-sample половина). |
+| `6a5d768` (P) | Расширенный junk stripper — Groups E/F/G (constant folding, dead-store elimination, backward liveness) + fixed-point итерация в `junk_stripper.rs`/`junk_stripper_folds.rs`/`junk_stripper_effects*.rs`. Закрывает roadmap #5 (вторая половина). |
+| `0c10fdd` (Q) | Cross-handler consistency-гейт для `register_roles` (`register_roles_consistency.rs`) + VMP 3.x суб-версийные hints (`VmpVersionDetail`). Закрывает roadmap #7 (вторая половина). |
+| `59908c6` (O) | Дозакрывает семантический классификатор до **35/35** таксономии: `Ret`/`Vemit`/`Popstk`/`Pushstk` + уточнение `Popf`/`Vsetvsp` (см. §Q2 ниже). |
+| `b1c3ccd` (R) | `--export-analysis <FILE>` — единый JSON-отчёт (family + version + confidence + dispatch + register roles + handler classifications + crypto scheme + coverage %); `vmp_semantic_confidence: u8` добавлено на `HandlerClassification` (breaking). |
+| `8932073` (S) | `src/synthetic_sample.rs` + `src/synthetic_sample_handlers.rs` — генератор VMP-shaped synthetic PE (корректный layout секций, entry stub, dispatcher fingerprint, 256-entry dispatch table, 30 handler shells); `tests/synthetic.rs` — 4 e2e теста под `--features synthetic-samples`, валидирующие весь пайплайн структурно без реальных сэмплов. Закрывает roadmap #9 (synthetic половина). |
+| `738bbf9` (T) | Correctness-sweep по итогам живого аудита: log-injection в `protector_signals.rs:138` (пропущенный call site из I), `has_xor_reg_imm` расширен с imm8-only до imm32 + reg-reg XOR форм, инвертированный confidence-scoring для `Ret`/`Vemit`/`Popstk`/`Pushstk` исправлен, `handler_agreement`-денаминатор теперь считает только voting-handlers, `Vsetvsp`-shape документирован как unreachable-on-live-handlers. |
+| `267607b` (U) | Test-quality sweep: убраны 2 тавтологичных detector-теста, дубликат `junk_stripper`-теста удалён, ужесточён `FROZEN_ESSENTIALS`-floor в synthetic-harness. |
+| `a4e135b` (V) | Architecture-debt sweep: удалены `ProtectorFamily::ExeCryptor`/`SafEngine` (ни разу не эмитили правил), `pub fn family_key` (тонкая обёртка над `as_str`), crate-root re-export'ы `VmpVersionDetail`/`HandlerCounts` (теперь internal-only). |
+
+**Итог (E→V):** RESEARCH_GAPS.md roadmap #1-#9 закрыты (кроме real-sample validation, которая по определению требует user-provided бинарников); §Q2 доведён до 35/35; три "новые pending-пункты" из раздела 3 закрыты J; собственный T/U/V аудит нашёл и исправил 5 correctness-багов + 3 test-quality issues + 3 dead-API removals поверх этого. Тестов: 111 → 315 (322 под `--features synthetic-samples`). Строк: 4 829 → 14 102. Файлов: 13 → 39.
 
 ---
 
@@ -87,7 +116,7 @@
 
 C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1a. Ниже — то, что реально осталось.
 
-### 🟡 Q2 — Расширить `HandlerClassifier` (multi-byte fingerprints) — ЧАСТИЧНО ЗАКРЫТО (`06ae816`)
+### ✅ Q2 — Расширить `HandlerClassifier` (multi-byte fingerprints) — ЗАКРЫТО (`06ae816` → `505bfed` G → `5f42752` L → `59908c6` O)
 
 **Где:** `src/handler_classifier.rs::analyze_bytecode`, `src/handler_semantic.rs` (новый модуль).
 
@@ -98,9 +127,10 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 - 20+ юнит-тестов на синтетических handler-body в `src/handler_semantic_tests.rs`.
 - Тесты дополнительно ужесточены в `e5fa959` — `assert_eq!(_, None)` вместо `assert_ne!(_, Some(X))` там, где раньше мисклассификация могла тихо проходить.
 
+**Что закрыто дальше (`505bfed` G, `5f42752` L, `59908c6` O):** таксономия доведена до **35/35** — каждый вариант `VmpSemantic` из таблицы ниже либо (a) имеет свой matcher, подключённый к `classify()` (~30 вариантов reachable через реальный порядок вызовов — см. `src/handler_semantic.rs` doc-comment на модуле для полного списка P0-заблокированных byte-identical пар), либо (b) документированный sentinel-only вариант: `Str` затенён (shadowed) `Ldd`'ом — обе формы byte-identical, `Ldd` идёт первым в `classify()` и выигрывает всегда, `Str` — future-extension slot, verified напрямую через свой matcher fn в тестах, но не через `classify()`; `Vexec` статически неотличим от `Vemit` (тот же "jump to VIP-derived address, no table lookup" shape) и folded в него; `Vunk`/`Unknown` — зарезервированные catch-all-варианты, не отдельные matcher-фингерпринты по дизайну.
+
 **Что осталось:**
-- ~27 из ~35 handler-matchers из таксономии ниже ещё не реализованы (LDD, STR, MUL, DIV, IDIV, IMUL, shifts/rotates, RDTSC/CPUID уже есть, LOCKOR, VPUSHCR0/CR3, RET, VEMIT, VEXEC, VNOP, VUNK и т.д.).
-- True-positive rate на реальных VMP 3.x бинарниках не верифицирован — нужен real-sample validation set (см. Q4 в разделе 5, Дни 6-7, всё ещё открыт).
+- True-positive rate на реальных VMP 3.x бинарниках не верифицирован — структурная корректность (byte-shape) подтверждена synthetic-harness'ом (Commit S), но корректность *значений* декодированных операндов и ALU-цепочек всё ещё требует real-sample validation set (Дни 6-7 в разделе 5, всё ещё открыт).
 - Старая x86-instruction-level таксономия (`handler_type: String`, напр. `MOV_REG_REG`) остаётся как fallback и не удалена — так и задумано (add-only migration).
 
 **Проблема:** сейчас match только по первому байту (плюс bitness-gate на REX-префикс, см. X1 в разделе 1a) → покрывает ~20 x86-паттернов из 256 opcode-слотов; всё остальное — `UNKNOWN` (confidence 30). Таксономия к тому же x86-инструкционная (`MOV_REG_REG`, `ADD_REG_REG`, …), а не VMP-семантическая (`PUSH_VALUE`, `NOR_CHAIN`, …) — маппинг x86→VMP-семантика ещё предстоит. Для реальных VMP-handlers надо смотреть:
@@ -140,11 +170,11 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 **Исторический план для Q2-subagent (закрыт `06ae816`, оставлен для аудита):**
 1. ✅ Ввести `enum VmpSemantic` с этими ~35 вариантами — реализовано в `src/handler_semantic.rs` (не в `handler_classifier.rs`, как планировалось изначально — отдельный модуль).
 2. ✅ Расширить `HandlerClassification` полем `vmp_semantic: Option<VmpSemantic>` — сделано, `handler_type: String` остаётся fallback.
-3. 🟡 Реализовать multi-instruction matcher для 6-10 самых distinctive шаблонов — сделано **8 из 10** (Pop, Push, Nand, Nor, Vmexit, Vjmp, Rdtsc, Cpuid); Ret и Push-imm/Push-reg differentiation не реализованы отдельно.
+3. ✅ Реализовать multi-instruction matcher для всей таксономии — исходно **8 из 10**, доведено до **35/35** через `505bfed` (G, +8 P0), `5f42752` (L, +14), `59908c6` (O, closes remaining Ret/Vemit/Popstk/Pushstk + Popf/Vsetvsp refinement).
 4. Fallback на существующие x86-instruction-level labels для неопознанных handlers — не требовалось отдельной реализации, `handler_type: String` уже был fallback по дизайну поля #2.
 5. ✅ Unit-тесты на синтетических handler-body последовательностях — 20+ тестов в `src/handler_semantic_tests.rs`.
 
-**Что НЕЛЬЗЯ верифицировать без sample-а:** true-positive rate на реальных VMP 3.x бинарниках. Требуется real-sample validation set (~5-10 разных VMP-protected `.exe`) — открытый пункт, см. раздел 5 (Дни 6-7).
+**Что НЕЛЬЗЯ верифицировать без sample-а:** true-positive rate на реальных VMP 3.x бинарниках. Структурная корректность (все 35 matcher-shapes согласуются друг с другом и с остальным пайплайном) теперь проверяется synthetic-sample harness'ом (Commit S, `--features synthetic-samples`) без реальных бинарников; корректность декодированных *значений* операндов всё ещё требует real-sample validation set (~5-10 разных VMP-protected `.exe`) — открытый пункт, см. раздел 5 (Дни 6-7).
 
 ---
 
@@ -281,8 +311,8 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 **F3 — Нет способа переопределить detected version.** ✅
 Фикс применён: флаг `--force-version <vmp1|vmp2|vmp30|vmp35|vmp36>`, применяется до логирования/гейта на версию.
 
-### ✅ Спринт 2 (частично завершён) — «Полное покрытие handlers»
-- Q2 — VMP-семантический классификатор: 8 из ~35 handlers, taxonomy готова. См. §Q2. **Частично** shipped `06ae816`.
+### ✅ Спринт 2 (завершён) — «Полное покрытие handlers»
+- Q2 — VMP-семантический классификатор: **35/35** taxonomy закрыто. Исходно 8 из ~35 (`06ae816`), затем `505bfed` (G, +8 P0), `5f42752` (L, +14), `59908c6` (O, дозакрывает Ret/Vemit/Popstk/Pushstk + Popf/Vsetvsp refinement). См. §Q2.
 - Q4 — exhaustive `decode_operands` под Q2 taxonomy: **не сделано**, API стал breaking (`&mut OpcodeCryptor`) в `64288a4`, но matching всё ещё на старых x86-labels. См. §Q4.
 - Q3 — символический ALU decompose: `dummy → "vsp+0"/"vsp+8"` **сделано** `64288a4`; symbolic engine для произвольных цепочек — нет. См. §Q3.
 
@@ -294,17 +324,17 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 - X-new/C — end-to-end валидация на реальном x86 VMP-сэмпле. Не начато — см. раздел 5, Дни 6-7 (по-прежнему заблокировано отсутствием сэмплов).
 - X-new/D — rustdoc examples для публичного API. Не начато.
 
-### 🟡 Новые pending-пункты, найденные аудитом (не пофикшены)
+### ✅ Новые pending-пункты, найденные аудитом — ЗАКРЫТО в `337a4fb` (J)
 
-- **Version-detector tiebreaker** (`src/version.rs:226`) — `max_by(points, then top_priority)` не имеет детерминированного разрешения при полном совпадении и points, и top_priority: `Iterator::max_by` возвращает последний из равных максимумов, порядок в массиве `candidates` (`Vmp1, Vmp2, Vmp30, Vmp35, Vmp36Plus`) молча определяет исход. Не покрыто тестом на явный tie. Оценка: 1-2 часа (детерминировать явно + regression test).
-- **Log-injection через section-имена** (`src/dispatch_table.rs`, вокруг строки 135, ветки `log::info!`/`log::warn!` в `locate`) — имена PE-секций читаются из файла (`section.name`) и попадают в лог без санитизации управляющих/ANSI-escape байт. Не RCE, но может искажать/подделывать лог-вывод при разборе malicious PE. Оценка: 30 мин (strip non-printable перед логированием).
-- **Unchecked `image_base + rva`/`image_base + section.virtual_address` арифметика** — множественные точки в `src/dispatch_table.rs` (строки ~27, 116, 136, 228, 286, 305, 336), `src/handler_classifier.rs:308`, `src/pe_loader.rs` (строки ~415, 433) складывают `u64` без `checked_add`; malicious PE с `image_base`/`rva` близко к `u64::MAX` может вызвать panic в debug или silent wraparound в release. `pe_loader.rs` частично исправлен ранее (S1/S4, см. раздел 1), но новые сложения, добавленные в `64288a4`/`06ae816`/`e586638`, этот паттерн не наследуют. Оценка: 2-4 часа на аудит всех точек + `checked_add`/`saturating_add`.
+- **Version-detector tiebreaker** (`src/version.rs`) — ✅ закрыто. `max_by` теперь итерирует в обратном порядке (`.rev()`) так, что среди равных максимумов побеждает первый элемент исходного `candidates`-массива (детерминированно, а не по умолчанию "последний из равных"); tie explicitly логируется через `log::warn!` с указанием, какие кандидаты были отброшены только порядком массива. См. `src/version.rs` — поиск `tiebreak` в doc-комментарии над вызовом `max_by`.
+- **Log-injection через section-имена** — ✅ закрыто. `sanitise_section_name` (`src/pe_loader.rs:256`) экранирует control/ESC/non-ASCII байты перед логированием; вызывается из `dispatch_table.rs:145` и `lib.rs:189`. Третий call site — `src/protector_signals.rs:138` (добавлен структурным dispatcher-сканером `I`, не наследовал санитизацию) — закрыт отдельно в Commit T (`738bbf9`).
+- **Unchecked `image_base + rva` арифметика** — ✅ закрыто. `saturating_add`/`checked_add` sweep применён по всем точкам сложения в `src/dispatch_table.rs`, `src/xor_key_analyzer.rs`, `src/dispatch_extractor_py.rs` (21 occurrence суммарно по проекту на момент 2026-07-27 — `grep -rn saturating_add src/`).
 
 ---
 
 ## 5. Недельный roadmap для следующей сессии (реалистичный)
 
-> **Дни 1-5 закрыты** (коммиты `b95246d`, `06ae816`, `64288a4` — см. раздел 1b для детального разбора того, что именно сделано против того, что планировалось). Таблица ниже сохранена как исходный план сессии 2026-07-26; актуальный статус — колонка "Факт" справа. **Дни 6-7 всё ещё открыты** — заблокированы отсутствием real VMP-3 sample-бинарников.
+> **Дни 1-5 закрыты** (коммиты `b95246d`, `06ae816`, `64288a4` — см. раздел 1b для детального разбора того, что именно сделано против того, что планировалось). Таблица ниже сохранена как исходный план сессии 2026-07-26; актуальный статус — колонка "Факт" справа. **Дни 6-7 частично открыты** (актуализировано после Commits N/S, см. §1c): структурная валидация всего детекционного пайплайна (family + version + dispatch table + register roles + semantic classifier согласуются друг с другом) теперь покрыта `--features synthetic-samples` (Commit S, `8932073`) — 4 e2e-теста прогоняют CLI против сгенерированных VMP-shaped PE и проверяют `--export-analysis` JSON. Real-sample валидация (`--features real-samples`, Commit N, `d320477`) по-прежнему ждёт user-provided VMP-бинарников в `tests/fixtures/vmp*/` — пустое дерево тестов проходит "skip", а не "fail", но ничего не *доказывает*. Семантическая валидация Дней 6-7 (корректность значений decrypted operands, корректность ALU-цепочек на реальном коде) остаётся открытой — synthetic-генератор кодирует byte-shapes, которые сам же классификатор ожидает, так что он не может обнаружить расхождение с реальным VMP-выхлопом.
 
 Цель: получить рабочий инструмент, честно анализирующий простой VMP-3 sample (hello world под VMP), с выхлопом узнаваемых handler-имён.
 
@@ -315,7 +345,7 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 | **3** | Q2-full — оставшиеся ~29 handlers + Q4 (`decode_operands` refresh) | 1 subagent: расширяем matcher-таблицу до полной taxonomy; обновляем `decode_operands` под новые VmpSemantic. | 6-8 ч | День 2 | 🟡 не сделано — только API-breaking смена сигнатуры `decode_operands` в `64288a4`, matcher-таблица не расширена |
 | **4** | X-new/A — подключить `OpcodeCryptor` в pipeline | Пишу сам (не subagent): в `decode_operands` вызвать `OpcodeCryptor::decrypt_operands` для VMP-версий которые шифруют immediate. CRC-init из VIP handler-а. Тесты. | 4 ч | Q2 | ✅ `64288a4` |
 | **5** | Q3 — символический ALU decompose | 1 subagent: `VspSlot(offset)` вместо dummy строк; De Morgan → синтезированный `Add/Sub/And/Or/Xor`; вызов из `decode_operands` для NOR/NAND. Тесты. | 6-8 ч | Q2 | ✅ частично `64288a4`+`e586638` (строковые слоты, не typed `VspSlot`; см. §Q3) |
-| **6** | X-new/C — real-sample validation | Собираю 3-5 VMP-3 sample-бинарников (можно с VMProtect Free/Trial на простом hello-world). Прогоняю CLI. Ловим bugs. Правлю. | 6 ч | Дни 1-5 | ⬜ ОТКРЫТО — заблокировано отсутствием sample-бинарников |
+| **6** | X-new/C — real-sample validation | Собираю 3-5 VMP-3 sample-бинарников (можно с VMProtect Free/Trial на простом hello-world). Прогоняю CLI. Ловим bugs. Правлю. | 6 ч | Дни 1-5 | 🟡 ЧАСТИЧНО — structural pipeline validation закрыт synthetic-harness'ом без реальных бинарников (`8932073` S); real-sample-половина (`d320477` N харнесс существует, `tests/fixtures/vmp*/` по-прежнему пусты) всё ещё ждёт user-provided сэмплов |
 | **7** | X-new/B — `ALUReconstructor` в pipeline + доработка + release 0.2 | Подключаем ALUReconstructor. Пишу CHANGELOG. Тегаю v0.2.0. Локальные gate'ы (build/test/clippy/fmt) чистые. | 4 ч | Дни 1-6 | 🟡 ALUReconstructor подключён (день 4-5, раньше плана); CHANGELOG.md создан отдельным Commit D; v0.2.0 tag не поставлен |
 
 **Итого:** ~40-45 часов работы с subagent-ассистированием. За календарную неделю (5 рабочих дней по 8 часов) реалистично закрыть дни 1-5. Дни 6-7 могут уползти во вторую неделю если валидация вскроет глубокие баги (обычно вскрывает).
@@ -351,9 +381,28 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
   - `e586638` — Commit A: fix 7 correctness bugs surfaced by audit
   - `e5fa959` — Commit B: test-quality sweep
   - `5744974` — Commit C: architecture cleanup: dedupe PE fixture, extract logic, kill dead API
+- Коммиты на `main` (research-gap remediation + T/U/V audit, см. раздел 1c для деталей):
+  - `42cb238` — E: `ProtectorFamily` foundation + class-level gate + VMP string markers
+  - `94f1af8` — F: vendor byte-table matchers (Themida/Enigma/Obsidium/Armadillo/ASPack/CV/Denuvo/BattlEye/Vanguard)
+  - `505bfed` — G: 8 P0 VMP semantic matchers
+  - `8bd4805` / `ea49498` — H: junk-code stripper pre-pass + fix-up
+  - `832ffc4` — I: structural VMP dispatcher fingerprint (renamed-section detection)
+  - `337a4fb` — J: audit-debt sweep (version tiebreak + log sanitisation + saturating arithmetic)
+  - `92c04af` — K: register-role canonicaliser
+  - `5f42752` — L: +14 semantic matchers (arithmetic/shift/rotate/system)
+  - `796da51` — M: `CryptoScheme` per-version dispatch
+  - `d320477` — N: real-sample harness (`--features real-samples`)
+  - `6a5d768` — P: enhanced junk stripper (Groups E/F/G) + fixed-point loop
+  - `0c10fdd` — Q: register-role cross-handler consistency + VMP sub-version hints
+  - `59908c6` — O: semantic classifier complete (35/35)
+  - `b1c3ccd` — R: `--export-analysis` unified JSON + confidence scoring
+  - `8932073` — S: synthetic-sample generator + `--features synthetic-samples` E2E harness
+  - `738bbf9` — T: correctness sweep (5 fixes) from post-implementation audit
+  - `267607b` — U: test-quality sweep from post-implementation audit
+  - `a4e135b` — V: architecture-debt sweep from post-implementation audit
 - Auto memory (для будущих сессий): `C:\Users\Platon\.claude\projects\D--GitHub-Rust-Projects-VM-Protect-Research\memory\`.
 - Reference sources для Q2 (GPL-3.0, READ ONLY): `0xnobody/vmpattack`, `can1357/NoVmp`.
 
 ---
 
-*Отчёт впервые собран Claude Code (Opus 4.7) в рамках сессии 46b758ca на 2026-07-26 — актуализирован после live-запуска CLI на не-VMP бинарнике, добавлен реалистичный недельный план для следующей сессии. Ревизия 2026-07-27 (Commit D, docs sync): сверены 6 дополнительных коммитов, закрывших Дни 1-5 недельного плана плюс отдельный audit-driven проход (Commits A-C — 7 correctness fixes, test-quality sweep, architecture cleanup). Строки/модули/тесты в разделе 0 пересчитаны напрямую (`wc -l`, `cargo test --all-targets`), не оценены.*
+*Отчёт впервые собран Claude Code (Opus 4.7) в рамках сессии 46b758ca на 2026-07-26 — актуализирован после live-запуска CLI на не-VMP бинарнике, добавлен реалистичный недельный план для следующей сессии. Ревизия 2026-07-27 (Commit D, docs sync): сверены 6 дополнительных коммитов, закрывших Дни 1-5 недельного плана плюс отдельный audit-driven проход (Commits A-C — 7 correctness fixes, test-quality sweep, architecture cleanup). Ревизия 2026-07-27 (Commit W, docs sync после T/U/V): сверены 18 дополнительных коммитов E→V, закрывающих практически весь `RESEARCH_GAPS.md` roadmap (класс-левел gate, 9 vendor matchers, 35/35 semantic taxonomy, junk stripper, register-role canonicaliser, per-version crypto, real+synthetic sample harnesses, unified JSON export) плюс собственный T/U/V аудит (5 correctness fixes, 3 test-quality fixes, 3 dead-API removals). Строки/модули/тесты в разделе 0 пересчитаны напрямую (`wc -l`, `cargo test --all-targets`, `cargo test --features synthetic-samples --all-targets`), не оценены.*
