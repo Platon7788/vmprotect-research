@@ -136,7 +136,7 @@ Input Binary (PE / ELF)
 
 ## Test status
 
-`cargo test --all-targets` — 111 tests, all green (105 lib + 1 bin + 5 integration; up from 66, up from 16 originally). `cargo clippy --all-targets` — 0 warnings. CI (`.github/workflows/ci.yml`) now runs build/test/clippy/fmt on a Windows + Linux matrix, plus a separate `cargo audit` + `cargo deny` security-audit job.
+`cargo test --all-targets` — 111 tests, all green (105 lib + 1 bin + 5 integration; up from 66, up from 16 originally). `cargo clippy --all-targets` — 0 warnings. This is a local-only research project — there is no CI. All four gates (`build`, `test`, `clippy --all-targets -- -D warnings`, `fmt --check`) must be run locally before commit. Tool configs (`rustfmt.toml`, `clippy.toml`, `deny.toml`) stay checked in for consistent local runs.
 
 Integration tests (`tests/cli.rs`, via `assert_cmd`) exercise the compiled CLI binary against in-memory-fixture-backed PE files: default `--vip` resolution, the non-VMP exit-code gate, `--force-version` override (including its rejection of unknown values), and short-flag disambiguation as a regression guard.
 
@@ -147,13 +147,16 @@ Real end-to-end validation against VMP-protected sample binaries has **not been 
 ## Development
 
 ```bash
-cargo build                        # debug build
-cargo test --all-targets           # 111 tests (105 lib + 1 bin + 5 integration)
-cargo clippy --all-targets         # 0 warnings (CI enforces -D warnings)
-cargo fmt --check                  # style is enforced project-wide (rustfmt.toml)
+cargo build                              # debug build
+cargo test --all-targets                 # 111 tests (105 lib + 1 bin + 5 integration)
+cargo clippy --all-targets -- -D warnings  # must be clean
+cargo fmt --check                        # style is enforced project-wide (rustfmt.toml)
 ```
 
-CI runs all four on every push/PR (`.github/workflows/ci.yml`), on a Windows + Linux matrix, with a separate `security-audit` job running `cargo audit` and `cargo deny check` (config: `deny.toml`).
+No CI. All four gates above are the developer's responsibility to run locally
+before every commit. Supply-chain audits are also local: `cargo audit` and
+`cargo deny check` (config: `deny.toml`) — run them when changing
+dependencies.
 
 ---
 

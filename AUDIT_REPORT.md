@@ -14,7 +14,7 @@
 | Тестов | 111 pass / 0 fail — 105 lib + 1 bin + 5 integration (`cargo test --all-targets`, было 66/0, до того 16/0) |
 | Clippy warnings | 0 (`cargo clippy --all-targets`) |
 | Build (dev + release) | ✓ |
-| CI | ✓ `.github/workflows/ci.yml` — Windows + Linux матрица (build/test/clippy/fmt) + отдельный `security-audit` job (`cargo audit` + `cargo deny check`) |
+| CI | ⛔ отключён — проект локальный, GitHub Actions удалён (2026-07-27); все 4 gate'а (`build`/`test`/`clippy -D warnings`/`fmt --check`) обязаны прогоняться локально перед коммитом |
 | Deps latest | ✓ (goblin 0.10.7, clap 4.6.4, serde 1.0.229, serde_json 1.0.151, anyhow 1.0.104, log 0.4.33, env_logger 0.11.11) |
 
 > Строки/модули/тесты в этой таблице — актуализировано 2026-07-27 (см. раздел 1b). Остальной текст ниже сохранён как исторический след сессии 2026-07-26 и помечен там, где он устарел.
@@ -55,7 +55,7 @@
 | X1 | `src/pe_loader.rs`, `src/xor_key_analyzer.rs`, `src/handler_classifier.rs` | Новый `enum Bitness { X86, X64 }`, определяется из `pe.is_64`. Прокинут в `XorKeyAnalyzer` (entry_size 4 vs 8, XOR-паттерны с/без REX) и `HandlerClassifier` (ветка REX-префикса `0x48` теперь gated на `Bitness::X64`; на x86 `0x48` — это `DEC EAX`, раньше классифицировался неверно). Проверено юнит-тестами на обоих bitness, live x86 VMP-сэмпл не прогонялся. |
 | S7 | `src/pe_loader.rs`, `src/handler_classifier.rs` | Новый `PEBinary::read_bytes_up_to(va, max) -> Result<Vec<u8>>` — читает `min(max, remaining-in-section)` вместо жёстких 100 байт. `HandlerClassifier::classify` использует его, короткие handlers у границы секции больше не помечаются `UNREADABLE`. |
 | Q7 | `src/unicorn_emulator.rs` → `src/xor_key_analyzer.rs`, `src/unicorn_dispatch_extractor.rs` → `src/dispatch_extractor_py.rs` | Файлы и типы переименованы: `UnicornEmulator` → `XorKeyAnalyzer`, `UnicornDispatchExtractor` → `DispatchExtractorPy`. `mod`/`pub use` в `lib.rs` и README обновлены. |
-| Q10 | `.github/workflows/ci.yml`, `rustfmt.toml`, `clippy.toml` | CI добавлен: build/test/clippy/fmt на Windows + Linux матрице, отдельный `security-audit` job (`cargo audit` + `cargo deny check`). `rustfmt.toml`/`clippy.toml` закоммичены, `cargo fmt --all` применён по всему проекту. |
+| Q10 | ~~`.github/workflows/ci.yml`~~, `rustfmt.toml`, `clippy.toml` | CI добавлен и позже удалён — см. `2026-07-27`, проект переведён на local-only gate discipline. Инструментальные конфиги (`rustfmt.toml`, `clippy.toml`, `deny.toml`) остаются под git — гарантируют одинаковое поведение локальных прогонов. |
 | Q11 | `docs/` | `IMPLEMENTATION_COMPLETE.md`, `VALIDATION_REPORT.md`, `UNICORN_IMPLEMENTATION_REPORT.md`, `FUTURE_WORK.md` перенесены из корня в `docs/`. |
 | — | все модули | `cargo fmt --all` применён проектно-широко после переименований/рефакторинга — стиль унифицирован. |
 | тесты | все модули | Юнит-тесты выросли с 16 до 66 (детекция версии, dual-bitness classifier, `read_bytes_up_to`, dispatch-table hint validation, `Bytecode::size` per-handler, `parse_hex_rva`, и т.д.). |
@@ -252,7 +252,7 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 - Q9, Q11 — README + docs reorg. См. `cbb6186`.
 
 ### ✅ Спринт 3 (завершён) — «Инфраструктура»
-- Q10 — CI + cargo-audit + cargo-deny + rustfmt/clippy. См. `d81cfbd`.
+- Q10 — CI (позже удалён — local-only) + cargo-audit + cargo-deny + rustfmt/clippy. См. `d81cfbd` + удаление GitHub Actions от 2026-07-27.
 - Q7 — `unicorn_*` переименованы. См. `cbb6186`.
 - S7 — bounds-safe handler read. См. `cbb6186`.
 - CLI: `-v` collision fix + regression-guard test. См. `2ce88ec`.
@@ -305,7 +305,7 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 | **4** | X-new/A — подключить `OpcodeCryptor` в pipeline | Пишу сам (не subagent): в `decode_operands` вызвать `OpcodeCryptor::decrypt_operands` для VMP-версий которые шифруют immediate. CRC-init из VIP handler-а. Тесты. | 4 ч | Q2 | ✅ `64288a4` |
 | **5** | Q3 — символический ALU decompose | 1 subagent: `VspSlot(offset)` вместо dummy строк; De Morgan → синтезированный `Add/Sub/And/Or/Xor`; вызов из `decode_operands` для NOR/NAND. Тесты. | 6-8 ч | Q2 | ✅ частично `64288a4`+`e586638` (строковые слоты, не typed `VspSlot`; см. §Q3) |
 | **6** | X-new/C — real-sample validation | Собираю 3-5 VMP-3 sample-бинарников (можно с VMProtect Free/Trial на простом hello-world). Прогоняю CLI. Ловим bugs. Правлю. | 6 ч | Дни 1-5 | ⬜ ОТКРЫТО — заблокировано отсутствием sample-бинарников |
-| **7** | X-new/B — `ALUReconstructor` в pipeline + доработка + release 0.2 | Подключаем ALUReconstructor. Пишу CHANGELOG. Тегаю v0.2.0. Пушим CI зелёный. | 4 ч | Дни 1-6 | 🟡 ALUReconstructor подключён (день 4-5, раньше плана); CHANGELOG.md создан отдельным Commit D; v0.2.0 tag не поставлен |
+| **7** | X-new/B — `ALUReconstructor` в pipeline + доработка + release 0.2 | Подключаем ALUReconstructor. Пишу CHANGELOG. Тегаю v0.2.0. Локальные gate'ы (build/test/clippy/fmt) чистые. | 4 ч | Дни 1-6 | 🟡 ALUReconstructor подключён (день 4-5, раньше плана); CHANGELOG.md создан отдельным Commit D; v0.2.0 tag не поставлен |
 
 **Итого:** ~40-45 часов работы с subagent-ассистированием. За календарную неделю (5 рабочих дней по 8 часов) реалистично закрыть дни 1-5. Дни 6-7 могут уползти во вторую неделю если валидация вскроет глубокие баги (обычно вскрывает).
 
@@ -314,7 +314,7 @@ C1, C3, C4, S7, X1, Q6, Q7, Q9, Q10, Q11 закрыты — см. раздел 1
 - Devirtualize_range шагает по реальным instruction-длинам, decrypts operand через `OpcodeCryptor`, восстанавливает `ADD/SUB/AND/OR/XOR` из NOR/NAND-цепочек.
 - Graceful exit на не-VMP бинарниках.
 - Все 66+ юнит-тестов + новые integration-тесты (`assert_cmd` на mock-PE).
-- CI зелёный на Windows + Linux + security audit.
+- Локальный gate discipline: `build`/`test --all-targets`/`clippy --all-targets -- -D warnings`/`fmt --check` чистые перед каждым коммитом (проект local-only, CI на GitHub Actions отключён 2026-07-27).
 - Documented API + пример в README.
 
 **Что НЕ получишь:**
